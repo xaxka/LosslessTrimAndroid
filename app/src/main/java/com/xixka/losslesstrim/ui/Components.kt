@@ -32,7 +32,6 @@ import androidx.compose.material3.OutlinedButton as OutlinedButtonM3
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TextButtonDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -317,7 +316,7 @@ fun BlTextButton(
     TextButton(
         onClick = onClick,
         modifier = modifier,
-        colors = TextButtonDefaults.textButtonColors(
+        colors = ButtonDefaults.textButtonColors(
             contentColor = MaterialTheme.colorScheme.secondary
         ),
         content = content,
