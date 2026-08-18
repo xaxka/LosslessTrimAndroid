@@ -27,9 +27,12 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton as OutlinedButtonM3
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextButtonDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -309,12 +312,12 @@ fun MonoText(text: String, modifier: Modifier = Modifier, color: Color = BlExt.t
 fun BlTextButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    content: @Composable () -> Unit,
+    content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit,
 ) {
     TextButton(
         onClick = onClick,
         modifier = modifier,
-        colors = androidx.compose.material3.TextButtonDefaults.textButtonColors(
+        colors = TextButtonDefaults.textButtonColors(
             contentColor = MaterialTheme.colorScheme.secondary
         ),
         content = content,
@@ -326,13 +329,13 @@ fun BlOutlinedButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
-    content: @Composable () -> Unit,
+    content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit,
 ) {
-    androidx.compose.material3.OutlinedButton(
+    OutlinedButtonM3(
         onClick = onClick,
         modifier = modifier,
         enabled = enabled,
-        colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
+        colors = ButtonDefaults.outlinedButtonColors(
             contentColor = MaterialTheme.colorScheme.secondary
         ),
         content = content,
