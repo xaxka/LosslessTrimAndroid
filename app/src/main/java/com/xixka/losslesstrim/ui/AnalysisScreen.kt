@@ -3,15 +3,14 @@ package com.xixka.losslesstrim.ui
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -29,6 +28,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -45,17 +45,22 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.xixka.losslesstrim.data.PerFileOverride
 import com.xixka.losslesstrim.data.TrimMode
 import com.xixka.losslesstrim.data.VideoEntry
 import com.xixka.losslesstrim.ffmpeg.Probe
 import com.xixka.losslesstrim.trim.TrimPlanner
+import com.xixka.losslesstrim.ui.theme.BlExt
+import com.xixka.losslesstrim.ui.theme.BlPrimary
+import com.xixka.losslesstrim.ui.theme.BlSecondary
+import com.xixka.losslesstrim.ui.theme.BlSurfaceVariant
 import com.xixka.losslesstrim.util.Formats
+import java.util.Locale
 import kotlin.math.abs
 
+/** 单文件分析视图：时间轴 + 关键帧 + 切点抽帧 + 轨道勾选 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
@@ -65,16 +70,14 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
     val savedOverride = overrides[entry.docUri]
     val dur = entry.probe.durationSec
 
-    // 关键帧探测（异步，带缓存）
     var keyframes by remember(entry.docUri) { mutableStateOf<List<Double>?>(null) }
     LaunchedEffect(entry.docUri) {
         keyframes = Probe.probeKeyframes(context, entry.docUri)
     }
 
     fun fmtSec(v: Double): String =
-        if (v == v.toLong().toDouble()) v.toLong().toString() else String.format(java.util.Locale.US, "%.1f", v)
+        if (v == v.toLong().toDouble()) v.toLong().toString() else String.format(Locale.US, "%.1f", v)
 
-    // 本片可编辑参数（初始：覆盖值 ?: 全局值）
     var headText by remember { mutableStateOf(fmtSec(savedOverride?.headSec ?: settings.headSec)) }
     var tailText by remember { mutableStateOf(fmtSec(savedOverride?.tailSec ?: settings.tailSec)) }
     var startText by remember { mutableStateOf(Formats.clock(savedOverride?.intervalStartSec ?: settings.intervalStartSec)) }
@@ -106,16 +109,17 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
     }
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
                 title = {
-                    Text(
-                        entry.name,
-                        maxLines = 1,
-                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                        fontSize = 16.sp,
-                    )
+                    Column {
+                        MonoText(entry.name)
+                    }
                 },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background
+                ),
                 navigationIcon = {
                     IconButton(onClick = onClose) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
@@ -129,23 +133,30 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                 .fillMaxSize()
                 .padding(padding)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // 概要
-            SectionCard("文件信息") {
-                Text(
-                    "时长 ${Formats.clock(dur)} · 大小 ${Formats.size(entry.sizeBytes)} · " +
-                            (entry.probe.videoCodec ?: "?") + " · " + entry.probe.formatName.substringBefore(','),
-                    fontSize = 12.sp,
-                )
-            }
+            SectionCard(
+                title = "文件信息",
+                subtitle = "时长 ${Formats.clock(dur)} · 大小 ${Formats.size(entry.sizeBytes)} · " +
+                        (entry.probe.videoCodec ?: "?") + " · " + entry.probe.formatName.substringBefore(','),
+            ) {}
 
-            // 时间轴
-            SectionCard("时间轴与切点") {
+            SectionCard(
+                title = "时间轴与切点",
+                subtitle = "橙线 = 关键帧（无损剪辑的物理边界）；红线 = 关键帧对齐后的实际切点；拖动圆点微调",
+            ) {
                 if (keyframes == null) {
-                    LinearProgressIndicator(Modifier.fillMaxWidth())
-                    Text("关键帧探测中…（读取索引，几秒）", fontSize = 11.sp, color = Color(0xFF64748B))
+                    LinearProgressIndicator(
+                        Modifier.fillMaxWidth(),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = BlSurfaceVariant,
+                    )
+                    Text(
+                        "关键帧探测中…（读取索引，几秒）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = BlExt.textSecondary,
+                    )
                 }
                 TimelineBar(
                     dur = dur,
@@ -156,20 +167,12 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                     actEnd = plan.actualEnd,
                     onDragPoint = { isStart, t -> onDragPoint(isStart, t) },
                 )
-                Text(
-                    "拖动圆点调整切点（当前模式：${if (settings.mode == TrimMode.HEAD_TAIL) "头尾裁剪" else "区间保留"}）。" +
-                            "红线 = 关键帧对齐后的实际切点；橙色竖线 = 关键帧。",
-                    fontSize = 11.sp,
-                    color = Color(0xFF64748B),
-                )
-
-                // 切点数值
                 if (settings.mode == TrimMode.HEAD_TAIL) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
                             value = headText,
                             onValueChange = { headText = it },
-                            label = { Text("片头(秒)") },
+                            label = { Text("距片头(秒)") },
                             singleLine = true,
                             isError = Formats.parseSeconds(headText) == null,
                             modifier = Modifier.weight(1f),
@@ -177,7 +180,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                         OutlinedTextField(
                             value = tailText,
                             onValueChange = { tailText = it },
-                            label = { Text("片尾(秒)") },
+                            label = { Text("距片尾(秒)") },
                             singleLine = true,
                             isError = Formats.parseSeconds(tailText) == null,
                             modifier = Modifier.weight(1f),
@@ -211,29 +214,28 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                         buildString {
                             append("设定起点 ").append(Formats.clockMs(plan.requestedStart))
                             append(" → 实际 ").append(Formats.clockMs(plan.actualStart))
-                            append("（${if (dS >= 0) "+" else ""}${String.format(java.util.Locale.US, "%.1f", dS)}s）\n")
+                            append("（${if (dS >= 0) "+" else ""}${String.format(Locale.US, "%.1f", dS)}s）\n")
                             append("设定终点 ").append(Formats.clockMs(plan.requestedEnd))
                             append(" → 实际 ").append(Formats.clockMs(plan.actualEnd))
-                            append("（${if (dE >= 0) "+" else ""}${String.format(java.util.Locale.US, "%.1f", dE)}s）\n")
+                            append("（${if (dE >= 0) "+" else ""}${String.format(Locale.US, "%.1f", dE)}s）\n")
                             append("保留时长 ≈ ").append(Formats.clock(plan.duration))
                             if (plan.truncated) append("（终点超片长已截断）")
                             if (kfs.isEmpty()) append("\n（无关键帧信息：音频文件或索引缺失，切点不做对齐）")
                         },
-                        fontSize = 12.sp,
-                        lineHeight = 18.sp,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = BlExt.textSecondary,
                     )
                 } else {
                     Text(
                         "当前参数不可处理：${plan.skipReason}",
-                        fontSize = 12.sp,
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
             }
 
-            // 切点抽帧
             if (plan.ok) {
-                SectionCard("切点抽帧确认") {
+                SectionCard(title = "切点抽帧确认", subtitle = "肉眼确认切的位置对不对") {
                     Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         FramePreview(
                             uri = entry.docUri,
@@ -251,12 +253,13 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                 }
             }
 
-            // 轨道列表
-            SectionCard("轨道（勾选保留，默认全保留）") {
+            SectionCard(title = "轨道", subtitle = "勾选保留，默认全保留；未动过的文件按全保留处理") {
                 entry.probe.streams.forEach { s ->
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 44.dp),
                     ) {
                         Checkbox(
                             checked = s.index !in dropped,
@@ -265,9 +268,13 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                             },
                         )
                         Column(Modifier.padding(start = 4.dp)) {
-                            Text(s.label(), fontSize = 13.sp)
+                            Text(s.label(), style = MaterialTheme.typography.bodyMedium)
                             if (s.isCover) {
-                                Text("封面轨，勾选后原样带出", fontSize = 11.sp, color = Color(0xFF64748B))
+                                Text(
+                                    "封面轨，勾选后原样带出",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = BlExt.textSecondary,
+                                )
                             }
                         }
                     }
@@ -275,7 +282,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                 if (dropped.isNotEmpty()) {
                     Text(
                         "将丢弃 ${dropped.size} 条轨道",
-                        fontSize = 11.sp,
+                        style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
@@ -283,7 +290,6 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
 
             Spacer(Modifier.height(4.dp))
 
-            // 保存
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(
                     onClick = {
@@ -301,7 +307,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                     modifier = Modifier.weight(1f),
                 ) { Text("保存本片设置") }
                 if (savedOverride != null) {
-                    TextButton(onClick = {
+                    BlTextButton(onClick = {
                         vm.setOverride(entry.docUri, null)
                         onClose()
                     }) { Text("恢复全局设置") }
@@ -312,7 +318,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
     }
 }
 
-/** 时间轴：关键帧 + 保留区 + 可拖动切点 + 对齐后实际切点 */
+/** 时间轴：关键帧（橙）+ 保留区（蓝）+ 实际切点（红）+ 可拖动手柄 */
 @Composable
 fun TimelineBar(
     dur: Double,
@@ -360,42 +366,42 @@ fun TimelineBar(
                 val trackTop = (h - 32f) / 2f
                 fun x(t: Double): Float = (t / dur * w).toFloat().coerceIn(0f, w)
 
-                // 轨道底色
+                // 轨道底（surfaceVariant）
                 drawRoundRect(
-                    color = Color(0xFFE2E8F0),
+                    color = BlSurfaceVariant,
                     topLeft = Offset(0f, trackTop),
                     size = Size(w, 32f),
                     cornerRadius = CornerRadius(16f, 16f),
                 )
-                // 保留区（设定）
+                // 保留区（设定，primary 55%）
                 val rx0 = x(reqStart)
                 val rx1 = x(reqEnd)
                 if (rx1 > rx0) {
                     drawRect(
-                        color = Color(0xFF38BDF8).copy(alpha = 0.4f),
+                        color = BlPrimary.copy(alpha = 0.55f),
                         topLeft = Offset(rx0, trackTop),
                         size = Size(rx1 - rx0, 32f),
                     )
                 }
-                // 关键帧
+                // 关键帧（warning 橙）
                 val step = if (keyframes.size > 1500) keyframes.size / 1500 + 1 else 1
                 var i = 0
                 while (i < keyframes.size) {
                     val kx = x(keyframes[i])
                     drawLine(
-                        color = Color(0xFFF59E0B).copy(alpha = 0.75f),
+                        color = BlExt.warning.copy(alpha = 0.75f),
                         start = Offset(kx, h / 2 - 24f),
                         end = Offset(kx, h / 2 + 24f),
                         strokeWidth = 1.5f,
                     )
                     i += step
                 }
-                // 实际切点（红线）
-                drawLine(Color(0xFFDC2626), Offset(x(actStart), 4f), Offset(x(actStart), h - 4f), 3f)
-                drawLine(Color(0xFFDC2626), Offset(x(actEnd), 4f), Offset(x(actEnd), h - 4f), 3f)
-                // 拖动手柄
-                drawCircle(Color(0xFF0284C7), radius = 11f, center = Offset(x(reqStart), h / 2))
-                drawCircle(Color(0xFF0284C7), radius = 11f, center = Offset(x(reqEnd), h / 2))
+                // 实际切点（error 红）
+                drawLine(BlExt.error, Offset(x(actStart), 4f), Offset(x(actStart), h - 4f), 2f)
+                drawLine(BlExt.error, Offset(x(actEnd), 4f), Offset(x(actEnd), h - 4f), 2f)
+                // 拖动手柄（secondary）
+                drawCircle(BlSecondary, radius = 11f, center = Offset(x(reqStart), h / 2))
+                drawCircle(BlSecondary, radius = 11f, center = Offset(x(reqEnd), h / 2))
                 drawCircle(Color.White, radius = 4f, center = Offset(x(reqStart), h / 2))
                 drawCircle(Color.White, radius = 4f, center = Offset(x(reqEnd), h / 2))
             }
@@ -404,12 +410,11 @@ fun TimelineBar(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            Text("00:00", fontSize = 10.sp, color = Color(0xFF64748B))
+            Text("00:00", style = MaterialTheme.typography.labelSmall, color = BlExt.textSecondary)
             Text(
                 "总时长 ${Formats.clock(dur)}",
-                fontSize = 10.sp,
-                color = Color(0xFF64748B),
-                fontWeight = FontWeight.Medium,
+                style = MaterialTheme.typography.labelSmall,
+                color = BlExt.textSecondary,
             )
         }
     }

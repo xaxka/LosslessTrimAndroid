@@ -4,25 +4,25 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- 时间轴条 -->
+    <!-- 时间轴条（surfaceVariant 系） -->
     <path
-        android:fillColor="#475569"
+        android:fillColor="#DDE3E9"
         android:pathData="M24,40 L84,40 A4,4 0 0 1 88,44 L88,64 A4,4 0 0 1 84,68 L24,68 A4,4 0 0 1 20,64 L20,44 A4,4 0 0 1 24,40 Z" />
-    <!-- 裁剪保留区（高亮） -->
+    <!-- 裁剪保留区（primary 浅蓝） -->
     <path
-        android:fillColor="#38BDF8"
+        android:fillColor="#91C6FF"
         android:pathData="M42,42 L62,42 L62,66 L42,66 Z" />
-    <!-- 播放三角 -->
+    <!-- 播放三角（onPrimary 深蓝） -->
     <path
-        android:fillColor="#FFFFFF"
+        android:fillColor="#001D36"
         android:pathData="M49,49 L57,54 L49,59 Z" />
-    <!-- 左右切点竖线 -->
+    <!-- 左右切点竖线（error 红） -->
     <path
-        android:strokeColor="#F87171"
+        android:strokeColor="#BA1A1A"
         android:strokeWidth="3"
         android:pathData="M42,36 L42,72" />
     <path
-        android:strokeColor="#F87171"
+        android:strokeColor="#BA1A1A"
         android:strokeWidth="3"
         android:pathData="M62,36 L62,72" />
 </vector>
