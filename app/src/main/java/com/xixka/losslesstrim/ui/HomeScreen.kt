@@ -326,6 +326,13 @@ fun HomeScreen(
                                         color = BlExt.textSecondary,
                                         maxLines = 1,
                                     )
+                                    // 标记文字按当前模式重新计算（切换模式即刷新）
+                                    val modeCustomized = if (settings.mode == TrimMode.HEAD_TAIL) {
+                                        st.override?.headSec != null || st.override?.tailSec != null
+                                    } else {
+                                        st.override?.intervalStartSec != null || st.override?.intervalEndSec != null
+                                    }
+                                    val hasDropped = st.override?.droppedStreams?.isNotEmpty() == true
                                     when {
                                         !e.probe.probeOk -> Text(
                                             "⚠ 不可处理（${e.probe.error ?: "解析失败"}）",
@@ -333,12 +340,21 @@ fun HomeScreen(
                                             color = MaterialTheme.colorScheme.error,
                                         )
 
-                                        st.plan.ok -> Text(
-                                            "✓ 保留 ${Formats.clock(st.plan.requestedStart)} – ${Formats.clock(st.plan.requestedEnd)}" +
-                                                    if (st.plan.truncated) "（终点超片长已截断）" else "",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = BlExt.success,
-                                        )
+                                        st.plan.ok -> if (modeCustomized) {
+                                            Text(
+                                                "✓ 保留 ${Formats.clock(st.plan.requestedStart)} – ${Formats.clock(st.plan.requestedEnd)}" +
+                                                        if (st.plan.truncated) "（终点超片长已截断）" else "",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = BlExt.success,
+                                            )
+                                        } else {
+                                            Text(
+                                                if (settings.mode == TrimMode.HEAD_TAIL) "未设置片头/片尾，本片不裁剪"
+                                                else "未设置区间，本片保留全片",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = BlExt.textSecondary,
+                                            )
+                                        }
 
                                         else -> Text(
                                             "跳过：${st.plan.skipReason}",
@@ -346,9 +362,15 @@ fun HomeScreen(
                                             color = BlExt.warning,
                                         )
                                     }
-                                    if (st.override != null) {
+                                    if (modeCustomized || hasDropped) {
                                         Text(
-                                            "⚙ 本片已自定义参数/轨道",
+                                            "⚙ " + when {
+                                                modeCustomized && settings.mode == TrimMode.HEAD_TAIL ->
+                                                    if (hasDropped) "本片已自定义片头/片尾 · 已选丢弃轨道" else "本片已自定义片头/片尾"
+                                                modeCustomized ->
+                                                    if (hasDropped) "本片已自定义开始/结束 · 已选丢弃轨道" else "本片已自定义开始/结束"
+                                                else -> "本片已选丢弃轨道"
+                                            },
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.secondary,
                                         )
