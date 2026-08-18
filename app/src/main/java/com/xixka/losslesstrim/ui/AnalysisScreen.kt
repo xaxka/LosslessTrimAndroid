@@ -369,6 +369,24 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                     }) { Text("恢复全局设置") }
                 }
             }
+            // 目录模式下：把本片的剪辑参数应用到全部视频（更新全局默认）
+            if (!entry.isSingleFile) {
+                BlOutlinedButton(
+                    onClick = {
+                        vm.updateSettings { s ->
+                            s.copy(
+                                headSec = head,
+                                tailSec = tail,
+                                intervalStartSec = if (settings.mode == TrimMode.INTERVAL) start else s.intervalStartSec,
+                                intervalEndSec = if (settings.mode == TrimMode.INTERVAL) endRaw else s.intervalEndSec,
+                            )
+                        }
+                        onClose()
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = plan.ok,
+                ) { Text("应用到全部视频") }
+            }
             Spacer(Modifier.height(24.dp))
         }
     }

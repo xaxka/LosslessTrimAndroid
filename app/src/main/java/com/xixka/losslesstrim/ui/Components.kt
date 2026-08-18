@@ -25,13 +25,19 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkBorder
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -452,55 +458,49 @@ fun VideoPlayerPanel(
             }
         }
         Spacer(Modifier.height(8.dp))
-        // 五按钮（规范顺序，播放居中）：上一关键帧 | 设置开始 | 播放/暂停 | 设置结束 | 下一关键帧
+        // 五按钮（图标版，播放居中）：上一关键帧 | 设置开始 | 播放/暂停 | 设置结束 | 下一关键帧
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             val posSec = posMs / 1000.0
-            val btnPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp)
             // ① 上一关键帧：只移动播放位置，不改切点
-            FilledTonalButton(
+            FilledTonalIconButton(
                 onClick = {
                     val prev = keyframes.filter { it < posSec - 0.05 }.maxOrNull() ?: 0.0
                     doSeek(prev)
                 },
                 enabled = prepared && keyframes.isNotEmpty(),
-                contentPadding = btnPadding,
-            ) { Text("«|", style = MaterialTheme.typography.titleSmall) }
+            ) { Icon(Icons.Default.SkipPrevious, contentDescription = "上一关键帧") }
             // ② 设置开始：segment.start = playhead
-            FilledTonalButton(
+            FilledTonalIconButton(
                 onClick = { onSetStart(posSec) },
                 enabled = prepared,
-                contentPadding = btnPadding,
-            ) { Text("[ 开始", style = MaterialTheme.typography.labelMedium) }
-            // ③ 播放/暂停（正中央）
+            ) { Icon(Icons.Default.Bookmark, contentDescription = "设置起点") }
+            // ③ 播放/暂停（正中央，主色强调）
             FilledIconButton(onClick = { togglePlay() }, enabled = prepared) {
-                if (playing) {
-                    Text("❚❚", style = MaterialTheme.typography.labelMedium)
-                } else {
-                    Icon(Icons.Default.PlayArrow, contentDescription = "播放")
-                }
+                Icon(
+                    if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    contentDescription = if (playing) "暂停" else "播放",
+                )
             }
             // ④ 设置结束：segment.end = playhead
-            FilledTonalButton(
+            FilledTonalIconButton(
                 onClick = { onSetEnd(posSec) },
                 enabled = prepared,
-                contentPadding = btnPadding,
-            ) { Text("结束 ]", style = MaterialTheme.typography.labelMedium) }
+            ) { Icon(Icons.Default.BookmarkBorder, contentDescription = "设置终点") }
             // ⑤ 下一关键帧：只移动播放位置，不改切点
-            FilledTonalButton(
+            FilledTonalIconButton(
                 onClick = {
                     val next = keyframes.filter { it > posSec + 0.05 }.minOrNull()
                         ?: (durMs / 1000.0)
                     doSeek(next)
                 },
                 enabled = prepared && keyframes.isNotEmpty(),
-                contentPadding = btnPadding,
-            ) { Text("|»", style = MaterialTheme.typography.titleSmall) }
+            ) { Icon(Icons.Default.SkipNext, contentDescription = "下一关键帧") }
         }
         Text(
-            "«| »| 只移动播放位置；[ 开始 / 结束 ] 设定剪辑区间",
+            "跳转按钮只移动播放位置；书签按钮设定剪辑区间起止",
             style = MaterialTheme.typography.labelSmall,
             color = BlExt.textSecondary,
         )
