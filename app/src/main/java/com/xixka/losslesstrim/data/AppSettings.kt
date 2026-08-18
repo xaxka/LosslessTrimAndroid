@@ -28,7 +28,6 @@ data class AppSettings(
     val alignment: AlignStrategy = AlignStrategy.CUT_LESS,
     val container: OutputContainer = OutputContainer.KEEP,
     val overwrite: Boolean = true,
-    val includeSubdirs: Boolean = false,
     /** 区间模式结束时间超片长：true=按片尾截断，false=跳过该文件 */
     val truncateOverlong: Boolean = true,
     /** 首次覆盖确认已展示过 */
@@ -47,7 +46,6 @@ class SettingsRepository(private val context: Context) {
         val ALIGNMENT = intPreferencesKey("alignment")
         val CONTAINER = intPreferencesKey("container")
         val OVERWRITE = booleanPreferencesKey("overwrite")
-        val SUBDIRS = booleanPreferencesKey("include_subdirs")
         val TRUNCATE = booleanPreferencesKey("truncate_overlong")
         val CONFIRMED = booleanPreferencesKey("overwrite_confirmed")
     }
@@ -62,7 +60,6 @@ class SettingsRepository(private val context: Context) {
             alignment = p[Keys.ALIGNMENT]?.let { AlignStrategy.entries.getOrNull(it) } ?: AlignStrategy.CUT_LESS,
             container = p[Keys.CONTAINER]?.let { OutputContainer.entries.getOrNull(it) } ?: OutputContainer.KEEP,
             overwrite = p[Keys.OVERWRITE] ?: true,
-            includeSubdirs = p[Keys.SUBDIRS] ?: false,
             truncateOverlong = p[Keys.TRUNCATE] ?: true,
             overwriteConfirmed = p[Keys.CONFIRMED] ?: false,
         )
@@ -87,7 +84,6 @@ class SettingsRepository(private val context: Context) {
                 alignment = p[Keys.ALIGNMENT]?.let { AlignStrategy.entries.getOrNull(it) } ?: AlignStrategy.CUT_LESS,
                 container = p[Keys.CONTAINER]?.let { OutputContainer.entries.getOrNull(it) } ?: OutputContainer.KEEP,
                 overwrite = p[Keys.OVERWRITE] ?: true,
-                includeSubdirs = p[Keys.SUBDIRS] ?: false,
                 truncateOverlong = p[Keys.TRUNCATE] ?: true,
                 overwriteConfirmed = p[Keys.CONFIRMED] ?: false,
             )
@@ -100,7 +96,6 @@ class SettingsRepository(private val context: Context) {
             p[Keys.ALIGNMENT] = next.alignment.ordinal
             p[Keys.CONTAINER] = next.container.ordinal
             p[Keys.OVERWRITE] = next.overwrite
-            p[Keys.SUBDIRS] = next.includeSubdirs
             p[Keys.TRUNCATE] = next.truncateOverlong
             p[Keys.CONFIRMED] = next.overwriteConfirmed
         }

@@ -12,7 +12,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
-/** 扫描 SAF 目录下的视频文件并逐个 ffprobe */
+/** 扫描 SAF 目录下的视频文件并逐个 ffprobe（仅当前目录，不递归子目录） */
 object Scanner {
 
     private val VIDEO_EXTS = setOf(
@@ -20,11 +20,11 @@ object Scanner {
         "ts", "m2ts", "mts", "mpeg", "mpg", "3gp", "3g2", "wmv", "ogv"
     )
 
-    suspend fun scanFolder(context: Context, treeUri: Uri, includeSubdirs: Boolean): List<VideoEntry> =
+    suspend fun scanFolder(context: Context, treeUri: Uri): List<VideoEntry> =
         withContext(Dispatchers.IO) {
             val root = DocumentFile.fromTreeUri(context, treeUri) ?: return@withContext emptyList()
             val files = ArrayList<Pair<DocumentFile, DocumentFile>>() // (file, folder)
-            collectFiles(root, root, includeSubdirs, files, depth = 0)
+            collectFiles(root, files)
             if (files.isEmpty()) return@withContext emptyList()
 
             val sem = Semaphore(4)
@@ -49,19 +49,11 @@ object Scanner {
 
     private fun collectFiles(
         folder: DocumentFile,
-        root: DocumentFile,
-        includeSubdirs: Boolean,
         out: ArrayList<Pair<DocumentFile, DocumentFile>>,
-        depth: Int,
     ) {
-        if (depth > 6) return
         val children = folder.listFiles()
         for (child in children) {
-            if (child.isDirectory) {
-                if (includeSubdirs && child.findFile(".nomedia") == null) {
-                    collectFiles(child, root, includeSubdirs, out, depth + 1)
-                }
-            } else if (child.isFile) {
+            if (child.isFile) {
                 val name = child.name ?: continue
                 val ext = name.substringAfterLast('.', "").lowercase()
                 val mime = child.type

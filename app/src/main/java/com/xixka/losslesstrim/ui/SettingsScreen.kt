@@ -101,20 +101,13 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
 
             GroupLabel("扫描")
             SectionCard(title = null) {
-                SwitchRow(
-                    title = "包含子目录",
-                    subtitle = "修改后自动重新扫描",
-                    checked = settings.includeSubdirs,
-                    onChange = { v -> vm.updateSettings { it.copy(includeSubdirs = v) } },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                 ChoiceField(
                     label = "结束时间超片长时",
                     options = listOf("按片尾截断", "跳过该文件"),
                     selected = if (settings.truncateOverlong) 0 else 1,
                 ) { idx -> vm.updateSettings { it.copy(truncateOverlong = idx == 0) } }
                 Text(
-                    "开始时间超片长时一律跳过该文件。",
+                    "仅扫描所选目录下的视频文件，不包含子目录。开始时间超片长时一律跳过该文件。",
                     style = MaterialTheme.typography.labelSmall,
                     color = BlExt.textSecondary,
                 )

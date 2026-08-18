@@ -25,8 +25,6 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -78,12 +76,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     _treeUri.value = uri
                     rescan()
                 }
-            }
-        }
-        // 子目录开关变化时自动重扫
-        viewModelScope.launch {
-            settings.map { it.includeSubdirs }.distinctUntilChanged().drop(1).collect {
-                if (_treeUri.value != null) rescan()
             }
         }
     }
@@ -185,7 +177,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _scanMsg.value = null
         scanJob = viewModelScope.launch {
             try {
-                val list = Scanner.scanFolder(getApplication(), tree, settings.value.includeSubdirs)
+                val list = Scanner.scanFolder(getApplication(), tree)
                 _files.value = list
                 _scanMsg.value = when {
                     list.isEmpty() -> "该文件夹里没有找到视频文件"
