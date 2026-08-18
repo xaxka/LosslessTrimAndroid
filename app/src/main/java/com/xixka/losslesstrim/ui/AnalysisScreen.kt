@@ -53,6 +53,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -194,7 +195,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
             // ---------- 时间轴 ----------
             SectionCard(
                 title = "时间轴与切点",
-                subtitle = "点击时间轴定位播放；拖动白色手柄调整切点（自动吸附关键帧）；红线 = 对齐后实际切点",
+                subtitle = "蓝块 = 保留；红斜纹 = 剪掉。拖动白手柄调整切点（自动吸附关键帧），红色虚线 = 关键帧对齐后的实际切点",
             ) {
                 if (keyframes == null) {
                     LinearProgressIndicator(
@@ -391,7 +392,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
     }
 }
 
-/** 时间轴（素材块风格）：缩略图层 → clip 块（保留亮/裁掉暗）→ 白色手柄 → 红实际切点 → Playhead（最上层） */
+/** 时间轴（三色语义）：缩略图层 → 浅灰轨道(原片全长) → 红斜纹(剪掉) + 蓝块(保留) → 白手柄 → 红虚线(实际切点) → Playhead */
 @Composable
 fun TimelineBar(
     uri: android.net.Uri,
@@ -470,76 +471,140 @@ fun TimelineBar(
             ) {
                 val w = size.width
                 val h = size.height
-                // 素材块几何：整条 clip 占满宽度，保留区亮、裁掉区暗蒙版（剪辑软件风格）
-                val blockH = 44f
-                val blockTop = (h - blockH) / 2f
-                val blockRadius = 8f
+                // 三色语义（参照 LosslessCut/剪映）：
+                // 浅灰整条轨道 = 原视频全长；实心蓝块 = 保留；红斜纹区 = 剪掉
+                val trackH = 44.dp.toPx()
+                val trackTop = (h - trackH) / 2f
+                val hairline = 1.dp.toPx()
                 fun x(t: Double): Float = (t / dur * w).toFloat().coerceIn(0f, w)
 
                 val rs = x(reqStart)
                 val re = x(reqEnd)
 
-                // 1. 素材块（圆角长方形，蓝色，模拟剪辑软件的 clip 块）
+                fun fmtCut(v: Double): String =
+                    if (v < 60.0) String.format(Locale.US, "%.1fs", v) else Formats.clock(v)
+
+                // 1. 轨道底（原视频全时长，浅灰）
+                drawRoundRect(
+                    color = BlSurfaceVariant.copy(alpha = 0.55f),
+                    topLeft = Offset(0f, trackTop),
+                    size = Size(w, trackH),
+                    cornerRadius = CornerRadius(8.dp.toPx(), 8.dp.toPx()),
+                )
+                // 2. 剪掉区域：红色淡染 + 45° 斜纹（移除语义，一眼可辨）
+                val hatchStep = 10.dp.toPx()
+                listOf(0f to rs, re to w).forEach { (from, to) ->
+                    if (to - from > 2f) {
+                        drawRect(
+                            color = BlExt.error.copy(alpha = 0.10f),
+                            topLeft = Offset(from, trackTop),
+                            size = Size(to - from, trackH),
+                        )
+                        var hx = from
+                        while (hx < to) {
+                            val x0 = maxOf(hx, from)
+                            val x1 = minOf(hx + trackH, to)
+                            drawLine(
+                                color = BlExt.error.copy(alpha = 0.45f),
+                                start = Offset(x0, trackTop + trackH),
+                                end = Offset(x1, trackTop),
+                                strokeWidth = 2 * hairline,
+                            )
+                            hx += hatchStep
+                        }
+                    }
+                }
+                // 3. 保留段：唯一实心彩色块（蓝），内缩 3px 形成"clip 块"感
                 drawRoundRect(
                     color = BlSecondary,
-                    topLeft = Offset(0f, blockTop),
-                    size = Size(w, blockH),
-                    cornerRadius = CornerRadius(blockRadius, blockRadius),
+                    topLeft = Offset(rs, trackTop + hairline),
+                    size = Size(maxOf(re - rs, 4f), trackH - 2 * hairline),
+                    cornerRadius = CornerRadius(6.dp.toPx(), 6.dp.toPx()),
                 )
-                // 2. 被裁掉的区域（片头/片尾）：深色蒙版
-                val scrim = Color(0xFF1A1C1E).copy(alpha = 0.45f)
-                if (rs > 0f) {
-                    drawRect(scrim, Offset(0f, blockTop), Size(rs, blockH))
+                // 4. 实际切点（关键帧对齐后）：红色竖虚线，贯穿轨道上下
+                val dashLen = 5.dp.toPx()
+                val dashStep = 9.dp.toPx()
+                listOf(x(actStart), x(actEnd)).forEach { cx ->
+                    var dy = trackTop - 6 * hairline
+                    val bottom = trackTop + trackH + 6 * hairline
+                    while (dy < bottom) {
+                        drawLine(
+                            color = BlExt.error,
+                            start = Offset(cx, dy),
+                            end = Offset(cx, minOf(dy + dashLen, bottom)),
+                            strokeWidth = 2 * hairline,
+                        )
+                        dy += dashStep
+                    }
                 }
-                if (re < w) {
-                    drawRect(scrim, Offset(re, blockTop), Size(w - re, blockH))
-                }
-                // 3. 实际切点（对齐后，红细线，标在块内）
-                drawLine(
-                    BlExt.error,
-                    Offset(x(actStart), blockTop + 3f),
-                    Offset(x(actStart), blockTop + blockH - 3f),
-                    2f,
-                )
-                drawLine(
-                    BlExt.error,
-                    Offset(x(actEnd), blockTop + 3f),
-                    Offset(x(actEnd), blockTop + blockH - 3f),
-                    2f,
-                )
-                // 4. 起止手柄：白色竖向抓取条（上下略突出块外）
-                val handleW = 12f
-                val grip = BlOutlineVariant
+                // 5. 白色抓取手柄（保留段两端，上下突出块外，带描边和抓取槽）
+                val handleW = 14.dp.toPx()
+                val handleProtrude = 9.dp.toPx()
                 listOf(rs, re).forEach { hx ->
                     val left = (hx - handleW / 2).coerceIn(0f, w - handleW)
                     drawRoundRect(
                         color = Color.White,
-                        topLeft = Offset(left, blockTop - 8f),
-                        size = Size(handleW, blockH + 16f),
+                        topLeft = Offset(left, trackTop - handleProtrude),
+                        size = Size(handleW, trackH + 2 * handleProtrude),
                         cornerRadius = CornerRadius(handleW / 2, handleW / 2),
                     )
-                    // 手柄抓取槽（3 条短横线）
-                    listOf(-7f, 0f, 7f).forEach { dy ->
+                    drawRoundRect(
+                        color = BlOutlineVariant.copy(alpha = 0.6f),
+                        topLeft = Offset(left, trackTop - handleProtrude),
+                        size = Size(handleW, trackH + 2 * handleProtrude),
+                        cornerRadius = CornerRadius(handleW / 2, handleW / 2),
+                        style = Stroke(width = 1.5f * hairline),
+                    )
+                    val gripGap = 8.dp.toPx()
+                    listOf(-gripGap, 0f, gripGap).forEach { dy ->
                         drawLine(
-                            color = grip,
-                            start = Offset(left + 3.5f, h / 2 + dy),
-                            end = Offset(left + handleW - 3.5f, h / 2 + dy),
-                            strokeWidth = 1.5f,
+                            color = BlOutlineVariant,
+                            start = Offset(left + 4 * hairline, trackTop + trackH / 2 + dy),
+                            end = Offset(left + handleW - 4 * hairline, trackTop + trackH / 2 + dy),
+                            strokeWidth = 1.5f * hairline,
                         )
                     }
                 }
-                // 5. Playhead（最上层，深色竖线 + 三角头）
+                // 6. 文字标注：保留段白字时长；剪掉段红字 ✂ 时长
+                val paint = android.graphics.Paint().apply {
+                    isAntiAlias = true
+                    textAlign = android.graphics.Paint.Align.CENTER
+                    textSize = 11.dp.toPx()
+                }
+                val cy = trackTop + trackH / 2f - (paint.ascent() + paint.descent()) / 2f
+                if (re - rs > 90.dp.toPx()) {
+                    paint.color = android.graphics.Color.WHITE
+                    paint.isFakeBoldText = true
+                    drawContext.canvas.nativeCanvas.drawText(
+                        "保留 ${Formats.clock(reqEnd - reqStart)}",
+                        (rs + re) / 2f, cy, paint,
+                    )
+                    paint.isFakeBoldText = false
+                }
+                paint.color = 0xFFBA1A1A.toInt()
+                if (rs > 64.dp.toPx()) {
+                    drawContext.canvas.nativeCanvas.drawText(
+                        "✂ ${fmtCut(reqStart)}", rs / 2f, cy, paint,
+                    )
+                }
+                if (w - re > 64.dp.toPx()) {
+                    drawContext.canvas.nativeCanvas.drawText(
+                        "✂ ${fmtCut(dur - reqEnd)}", (re + w) / 2f, cy, paint,
+                    )
+                }
+                // 7. Playhead（最上层，深色竖线 + 三角头）
                 val phx = x(playheadSec)
                 drawLine(
                     color = Color(0xFF1A1C1E),
-                    start = Offset(phx, 6f),
+                    start = Offset(phx, 2.dp.toPx()),
                     end = Offset(phx, h),
-                    strokeWidth = 3f,
+                    strokeWidth = 2.dp.toPx(),
                 )
+                val tri = 7.dp.toPx()
                 val path = androidx.compose.ui.graphics.Path().apply {
-                    moveTo(phx - 7f, 0f)
-                    lineTo(phx + 7f, 0f)
-                    lineTo(phx, 9f)
+                    moveTo(phx - tri, 0f)
+                    lineTo(phx + tri, 0f)
+                    lineTo(phx, tri + 2.dp.toPx())
                     close()
                 }
                 drawPath(path, color = Color(0xFF1A1C1E))
