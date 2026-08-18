@@ -1,6 +1,10 @@
 package com.xixka.losslesstrim.ui
 
+import android.graphics.Bitmap
+import android.media.MediaMetadataRetriever
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -8,6 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -36,15 +41,19 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -58,6 +67,8 @@ import com.xixka.losslesstrim.ui.theme.BlPrimary
 import com.xixka.losslesstrim.ui.theme.BlSecondary
 import com.xixka.losslesstrim.ui.theme.BlSurfaceVariant
 import com.xixka.losslesstrim.util.Formats
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.Locale
 import kotlin.math.abs
 
@@ -103,8 +114,9 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
         )
     }
 
-    // 视频面板 seek 请求（时间戳，<0 忽略）
+    // 视频面板 seek 请求（毫秒，<0 忽略）；playheadSec = 当前播放位置（≠切点）
     var seekReq by remember { mutableLongStateOf(-1L) }
+    var playheadSec by remember { mutableStateOf(0.0) }
 
     fun onDragPoint(isStart: Boolean, t: Double) {
         val clamped = t.coerceIn(0.0, dur)
@@ -140,13 +152,14 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // ---------- 视频预览面板（LosslessCut 五按钮） ----------
+            // ---------- 视频预览面板（五按钮：上一关键帧 / 设开始 / 播放暂停 / 设结束 / 下一关键帧） ----------
             VideoPlayerPanel(
                 uri = entry.docUri,
                 startSec = plan.requestedStart,
                 endSec = plan.requestedEnd,
+                keyframes = kfs,
                 onSetStart = { pos ->
-                    // 头尾模式：起点按钮 = 设置片头；区间模式：直接设开始
+                    // 头尾模式：设片头；区间模式：设开始
                     if (settings.mode == TrimMode.HEAD_TAIL) headText = fmtSec(pos.coerceIn(0.0, dur))
                     else startText = Formats.clock(pos.coerceIn(0.0, dur))
                 },
@@ -154,6 +167,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                     if (settings.mode == TrimMode.HEAD_TAIL) tailText = fmtSec((dur - pos).coerceIn(0.0, dur))
                     else endText = Formats.clock(pos.coerceIn(0.0, dur))
                 },
+                onPositionChange = { playheadSec = it },
                 seekRequest = seekReq,
             )
 
@@ -175,12 +189,14 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                     )
                 }
                 TimelineBar(
+                    uri = entry.docUri,
                     dur = dur,
                     keyframes = kfs,
                     reqStart = plan.requestedStart,
                     reqEnd = plan.requestedEnd,
                     actStart = plan.actualStart,
                     actEnd = plan.actualEnd,
+                    playheadSec = playheadSec,
                     onDragPoint = { isStart, t -> onDragPoint(isStart, t) },
                     onSeek = { t -> seekReq = (t * 1000).toLong() },
                 )
@@ -340,47 +356,68 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
     }
 }
 
-/** 时间轴：关键帧（橙）+ 保留区（蓝）+ 实际切点（红）+ 拖动手柄 + 点击定位 */
+/** 时间轴：缩略图层 → Segment 高亮 → Keyframe → Start/End 手柄 → Playhead（最上层） */
 @Composable
 fun TimelineBar(
+    uri: android.net.Uri,
     dur: Double,
     keyframes: List<Double>,
     reqStart: Double,
     reqEnd: Double,
     actStart: Double,
     actEnd: Double,
+    playheadSec: Double,
     onDragPoint: (isStart: Boolean, t: Double) -> Unit,
     onSeek: (Double) -> Unit,
 ) {
     var widthPx by remember { mutableStateOf(0f) }
-    var draggingStart by remember { mutableStateOf(true) }
+    // 0=拖 Start，1=拖 End，2=拖 Playhead
+    var dragMode by remember { mutableStateOf(2) }
+
+    fun xOf(t: Double): Float =
+        if (widthPx > 0 && dur > 0) (t / dur * widthPx).toFloat().coerceIn(0f, widthPx) else 0f
+
+    fun tOf(x: Float): Double =
+        if (widthPx > 0 && dur > 0) (x / widthPx * dur).coerceIn(0.0, dur) else 0.0
 
     Column {
+        // 缩略图条（等间距抽帧，不影响时间计算）
+        ThumbnailStrip(uri = uri, dur = dur)
+        Spacer(Modifier.height(4.dp))
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(72.dp)
-                .pointerInput(dur) {
+                .height(64.dp)
+                .pointerInput(dur, playheadSec) {
                     detectTapGestures { offset ->
                         if (widthPx > 0 && dur > 0) {
-                            onSeek((offset.x / widthPx * dur).coerceIn(0.0, dur))
+                            onSeek(tOf(offset.x))
                         }
                     }
                 }
-                .pointerInput(dur) {
+                .pointerInput(dur, reqStart, reqEnd, playheadSec) {
                     detectDragGestures(
                         onDragStart = { offset ->
                             if (widthPx > 0 && dur > 0) {
-                                val xs = (reqStart / dur * widthPx).toFloat()
-                                val xe = (reqEnd / dur * widthPx).toFloat()
-                                draggingStart = abs(offset.x - xs) <= abs(offset.x - xe)
+                                val px = xOf(playheadSec)
+                                val sx = xOf(reqStart)
+                                val ex = xOf(reqEnd)
+                                dragMode = when {
+                                    kotlin.math.abs(offset.x - px) <= 28f -> 2
+                                    kotlin.math.abs(offset.x - sx) <= kotlin.math.abs(offset.x - ex) -> 0
+                                    else -> 1
+                                }
                             }
                         },
                         onDrag = { change, _ ->
                             if (widthPx > 0 && dur > 0) {
                                 change.consume()
-                                val t = (change.position.x / widthPx * dur).coerceIn(0.0, dur)
-                                onDragPoint(draggingStart, t)
+                                val t = tOf(change.position.x)
+                                when (dragMode) {
+                                    2 -> onSeek(t)
+                                    0 -> onDragPoint(true, t)
+                                    else -> onDragPoint(false, t)
+                                }
                             }
                         },
                     )
@@ -396,12 +433,14 @@ fun TimelineBar(
                 val trackTop = (h - 32f) / 2f
                 fun x(t: Double): Float = (t / dur * w).toFloat().coerceIn(0f, w)
 
+                // 1. 轨道背景
                 drawRoundRect(
                     color = BlSurfaceVariant,
                     topLeft = Offset(0f, trackTop),
                     size = Size(w, 32f),
                     cornerRadius = CornerRadius(16f, 16f),
                 )
+                // 2. Segment 高亮（保留区）
                 val rx0 = x(reqStart)
                 val rx1 = x(reqEnd)
                 if (rx1 > rx0) {
@@ -411,24 +450,42 @@ fun TimelineBar(
                         size = Size(rx1 - rx0, 32f),
                     )
                 }
+                // 3. 关键帧标记
                 val step = if (keyframes.size > 1500) keyframes.size / 1500 + 1 else 1
                 var i = 0
                 while (i < keyframes.size) {
                     val kx = x(keyframes[i])
                     drawLine(
                         color = BlExt.warning.copy(alpha = 0.75f),
-                        start = Offset(kx, h / 2 - 24f),
-                        end = Offset(kx, h / 2 + 24f),
+                        start = Offset(kx, h / 2 - 22f),
+                        end = Offset(kx, h / 2 + 22f),
                         strokeWidth = 1.5f,
                     )
                     i += step
                 }
-                drawLine(BlExt.error, Offset(x(actStart), 4f), Offset(x(actStart), h - 4f), 2f)
-                drawLine(BlExt.error, Offset(x(actEnd), 4f), Offset(x(actEnd), h - 4f), 2f)
+                // 4. 实际切点（对齐后，红）
+                drawLine(BlExt.error, Offset(x(actStart), 2f), Offset(x(actStart), h - 2f), 2f)
+                drawLine(BlExt.error, Offset(x(actEnd), 2f), Offset(x(actEnd), h - 2f), 2f)
+                // 5. Start / End 手柄
                 drawCircle(BlSecondary, radius = 11f, center = Offset(x(reqStart), h / 2))
                 drawCircle(BlSecondary, radius = 11f, center = Offset(x(reqEnd), h / 2))
                 drawCircle(Color.White, radius = 4f, center = Offset(x(reqStart), h / 2))
                 drawCircle(Color.White, radius = 4f, center = Offset(x(reqEnd), h / 2))
+                // 6. Playhead（最上层，深色竖线 + 三角头）
+                val phx = x(playheadSec)
+                drawLine(
+                    color = Color(0xFF1A1C1E),
+                    start = Offset(phx, 0f),
+                    end = Offset(phx, h),
+                    strokeWidth = 3f,
+                )
+                val path = androidx.compose.ui.graphics.Path().apply {
+                    moveTo(phx - 7f, 0f)
+                    lineTo(phx + 7f, 0f)
+                    lineTo(phx, 9f)
+                    close()
+                }
+                drawPath(path, color = Color(0xFF1A1C1E))
             }
         }
         Row(
@@ -437,10 +494,84 @@ fun TimelineBar(
         ) {
             Text("00:00", style = MaterialTheme.typography.labelSmall, color = BlExt.textSecondary)
             Text(
+                "Playhead ${Formats.msFull((playheadSec * 1000).toLong())}",
+                style = MaterialTheme.typography.labelSmall,
+                color = BlExt.textPrimary,
+            )
+            Text(
                 "总时长 ${Formats.clock(dur)}",
                 style = MaterialTheme.typography.labelSmall,
                 color = BlExt.textSecondary,
             )
+        }
+    }
+}
+
+/** 缩略图条：等间距抽 12 帧（异步），仅视觉层，不参与时间计算 */
+@Composable
+fun ThumbnailStrip(uri: android.net.Uri, dur: Double) {
+    val context = LocalContext.current
+    val thumbs by produceState<List<Bitmap?>>(emptyList(), uri, dur) {
+        value = withContext(Dispatchers.IO) {
+            if (dur <= 0) return@withContext emptyList()
+            val mmr = MediaMetadataRetriever()
+            try {
+                mmr.setDataSource(context, uri)
+                val n = 12
+                (0 until n).map { i ->
+                    val t = ((i + 0.5) / n * dur * 1_000_000).toLong()
+                    try {
+                        mmr.getFrameAtTime(t, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    } catch (e: Exception) {
+                        null
+                    }
+                }
+            } catch (e: Exception) {
+                emptyList()
+            } finally {
+                try {
+                    mmr.release()
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(36.dp)
+            .clip(MaterialTheme.shapes.extraSmall)
+            .background(BlSurfaceVariant),
+    ) {
+        if (thumbs.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    "缩略图生成中…",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = BlExt.textDisabled,
+                )
+            }
+        } else {
+            thumbs.forEach { b ->
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .padding(0.5.dp)
+                        .clip(MaterialTheme.shapes.extraSmall)
+                        .background(BlSurfaceVariant),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (b != null) {
+                        Image(
+                            bitmap = b.asImageBitmap(),
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+                }
+            }
         }
     }
 }

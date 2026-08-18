@@ -28,6 +28,20 @@ object Formats {
     /** 毫秒 → "mm:ss" */
     fun ms(millis: Long): String = clock(millis / 1000.0)
 
+    /** 毫秒 → "HH:MM:SS.mmm"（小时为 0 时省略） */
+    fun msFull(millis: Long): String {
+        val m = millis.coerceAtLeast(0)
+        val h = m / 3_600_000
+        val mm = (m % 3_600_000) / 60_000
+        val ss = (m % 60_000) / 1000
+        val msPart = (m % 1000).toString().padStart(3, '0')
+        return if (h > 0) {
+            String.format(Locale.US, "%02d:%02d:%02d.%s", h, mm, ss, msPart)
+        } else {
+            String.format(Locale.US, "%02d:%02d.%s", mm, ss, msPart)
+        }
+    }
+
     /** 字节 → 可读大小 */
     fun size(bytes: Long): String {
         if (bytes < 0) return "?"

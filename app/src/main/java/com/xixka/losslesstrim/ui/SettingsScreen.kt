@@ -29,7 +29,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.xixka.losslesstrim.data.AlignStrategy
 import com.xixka.losslesstrim.data.OutputContainer
-import com.xixka.losslesstrim.data.TrimMode
 import com.xixka.losslesstrim.ui.theme.BlChipShape
 import com.xixka.losslesstrim.ui.theme.BlExt
 
@@ -65,12 +64,6 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
         ) {
             GroupLabel("剪辑")
             SectionCard(title = null) {
-                ChoiceField(
-                    label = "默认剪辑模式",
-                    options = listOf("头尾裁剪", "区间保留"),
-                    selected = settings.mode.ordinal,
-                ) { idx -> vm.updateSettings { s -> s.copy(mode = TrimMode.entries[idx]) } }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                 ChoiceField(
                     label = "关键帧对齐策略",
                     options = listOf("宁多切（默认）", "宁少切", "自动"),

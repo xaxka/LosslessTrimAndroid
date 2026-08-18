@@ -7,6 +7,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -40,6 +42,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -49,6 +52,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -60,7 +64,32 @@ import com.xixka.losslesstrim.trim.TrimController
 import com.xixka.losslesstrim.ui.theme.BlExt
 import com.xixka.losslesstrim.util.Formats
 
-/** 主页：精简参数卡 + 双入口（文件夹批量 / 单文件编辑）+ 文件列表 */
+/** 模式切换标签（分割线样式）：选中 = 中蓝加粗，未选中 = 灰 */
+@Composable
+private fun ModeTab(
+    text: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier
+            .clip(MaterialTheme.shapes.small)
+            .clickable(onClick = onClick)
+            .padding(vertical = 12.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text,
+            style = if (selected) MaterialTheme.typography.titleMedium
+            else MaterialTheme.typography.bodyMedium,
+            color = if (selected) MaterialTheme.colorScheme.secondary else BlExt.textSecondary,
+            fontWeight = if (selected) FontWeight.SemiBold else null,
+        )
+    }
+}
+
+/** 主页：模式切换（分割线）+ 参数卡 + 双入口（文件夹批量 / 单文件编辑）+ 文件列表 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
@@ -233,11 +262,38 @@ fun HomeScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // ---------- 参数卡（仅当前模式的两个数值；模式在设置中切换） ----------
+            // ---------- 模式切换（分割线样式，初版布局） ----------
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .heightIn(min = 48.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                ModeTab(
+                    text = "头尾裁剪",
+                    selected = settings.mode == TrimMode.HEAD_TAIL,
+                    modifier = Modifier.weight(1f),
+                ) { vm.updateSettings { it.copy(mode = TrimMode.HEAD_TAIL) } }
+                VerticalDivider(
+                    modifier = Modifier.height(20.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant,
+                )
+                ModeTab(
+                    text = "区间保留",
+                    selected = settings.mode == TrimMode.INTERVAL,
+                    modifier = Modifier.weight(1f),
+                ) { vm.updateSettings { it.copy(mode = TrimMode.INTERVAL) } }
+            }
+            HorizontalDivider(
+                modifier = Modifier.padding(horizontal = 16.dp),
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+            )
+
+            // ---------- 参数卡（仅当前模式的两个数值） ----------
             SectionCard(
-                title = if (settings.mode == TrimMode.HEAD_TAIL) "头尾裁剪" else "区间保留",
-                subtitle = "模式可在设置中切换",
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+                title = null,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (settings.mode == TrimMode.HEAD_TAIL) {

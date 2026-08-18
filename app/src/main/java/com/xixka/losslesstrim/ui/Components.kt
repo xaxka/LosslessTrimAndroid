@@ -162,7 +162,9 @@ fun EmptyState(
             }
         }
         if (button2Text != null && onButton2Click != null) {
-            BlOutlinedButton(onClick = onButton2Click) { Text(button2Text) }
+            FilledTonalButton(onClick = onButton2Click) {
+                Text(button2Text, color = MaterialTheme.colorScheme.onPrimaryContainer)
+            }
         }
     }
 }
@@ -310,17 +312,23 @@ fun FramePreview(uri: android.net.Uri, tSec: Double, label: String, timeLabel: S
 }
 
 /**
- * 视频预览面板（LosslessCut 风格）：画面 + 五按钮（跳到起点 / 设为起点 / 播放暂停 / 设为终点 / 跳到终点）。
- * seekRequest 用于外部（时间轴点击）驱动定位。
+ * 视频预览面板（LosslessCut 简单模式）。
+ * 五按钮：上一关键帧 / 设置开始 / 播放暂停 / 设置结束 / 下一关键帧。
+ * Playhead ≠ Start ≠ End ≠ Keyframe 四个概念独立：
+ *  - 关键帧按钮只移动播放位置，不改切点；
+ *  - 设开始/结束只写 segment，不动播放位置。
+ * seekRequest 外部（时间轴）驱动定位；onPositionChange 上报播放位置（供时间轴 Playhead 同步）。
  */
 @Composable
 fun VideoPlayerPanel(
     uri: android.net.Uri,
     startSec: Double,
     endSec: Double,
+    keyframes: List<Double>,
     onSetStart: (Double) -> Unit,
     onSetEnd: (Double) -> Unit,
-    seekRequest: Long,          // 毫秒时间戳，变化时 seek 到其值（时间戳即目标位置 ms）
+    onPositionChange: (Double) -> Unit,
+    seekRequest: Long,          // 毫秒，变化时 seek 到该位置
 ) {
     val context = LocalContext.current
     var playing by remember { mutableStateOf(false) }
@@ -329,7 +337,6 @@ fun VideoPlayerPanel(
     var durMs by remember { mutableStateOf(0L) }
 
     val player = remember(uri) { MediaPlayer() }
-    var texView by remember { mutableStateOf<TextureView?>(null) }
 
     DisposableEffect(uri) {
         player.setOnPreparedListener { mp ->
@@ -337,8 +344,12 @@ fun VideoPlayerPanel(
             durMs = mp.duration.toLong().coerceAtLeast(0)
             mp.seekTo((startSec * 1000).toInt().coerceAtLeast(0))
             posMs = (startSec * 1000).toLong().coerceAtLeast(0)
+            onPositionChange(posMs / 1000.0)
         }
-        player.setOnCompletionListener { it.seekTo((startSec * 1000).toInt().coerceAtLeast(0)); playing = false }
+        player.setOnCompletionListener {
+            it.seekTo(0)
+            playing = false
+        }
         player.setDataSource(context, uri)
         player.prepareAsync()
         onDispose {
@@ -350,20 +361,23 @@ fun VideoPlayerPanel(
         }
     }
 
-    // 播放中轮询位置
+    // 播放中轮询位置（Playhead 自动移动）
     LaunchedEffect(playing, prepared) {
         while (playing && prepared) {
-            posMs = try { player.currentPosition.toLong() } catch (_: Exception) { posMs }
-            kotlinx.coroutines.delay(200)
+            val p = try { player.currentPosition.toLong() } catch (_: Exception) { posMs }
+            posMs = p
+            onPositionChange(p / 1000.0)
+            kotlinx.coroutines.delay(100)
         }
     }
 
-    // 外部 seek（时间轴点击）
+    // 外部 seek（时间轴点击/拖动 Playhead）
     LaunchedEffect(seekRequest) {
         if (seekRequest >= 0 && prepared) {
             try {
                 player.seekTo(seekRequest.toInt())
                 posMs = seekRequest
+                onPositionChange(seekRequest / 1000.0)
             } catch (_: Exception) {
             }
         }
@@ -374,6 +388,7 @@ fun VideoPlayerPanel(
         try {
             player.seekTo(ms.toInt())
             posMs = ms
+            onPositionChange(ms / 1000.0)
         } catch (_: Exception) {
         }
     }
@@ -385,10 +400,6 @@ fun VideoPlayerPanel(
                 player.pause()
                 playing = false
             } else {
-                // 超出保留区则先回到起点
-                if (posMs < startSec * 1000 || (endSec * 1000 > 0 && posMs > endSec * 1000)) {
-                    doSeek(startSec)
-                }
                 player.start()
                 playing = true
             }
@@ -420,7 +431,6 @@ fun VideoPlayerPanel(
                             }
                             override fun onSurfaceTextureUpdated(st: android.graphics.SurfaceTexture) {}
                         }
-                        texView = tv
                     }
                 },
                 modifier = Modifier.fillMaxSize(),
@@ -428,11 +438,11 @@ fun VideoPlayerPanel(
             if (!prepared) {
                 Text("加载视频中…", color = Color.White, style = MaterialTheme.typography.labelMedium)
             } else {
-                // 当前位置角标
+                // 当前播放位置（精确到毫秒）
                 Text(
-                    "${Formats.ms(posMs)} / ${Formats.ms(durMs)}",
-                    color = Color.White.copy(alpha = 0.9f),
-                    style = MaterialTheme.typography.labelSmall,
+                    Formats.msFull(posMs),
+                    color = Color.White.copy(alpha = 0.95f),
+                    style = MaterialTheme.typography.labelMedium,
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .padding(8.dp)
@@ -442,21 +452,29 @@ fun VideoPlayerPanel(
             }
         }
         Spacer(Modifier.height(8.dp))
-        // 五按钮（LosslessCut 布局：|« 跳起点 / [ 设起点 / 播放暂停 / ] 设终点 / »| 跳终点）
+        // 五按钮（规范顺序，播放居中）：上一关键帧 | 设置开始 | 播放/暂停 | 设置结束 | 下一关键帧
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
+            val posSec = posMs / 1000.0
+            val btnPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp)
+            // ① 上一关键帧：只移动播放位置，不改切点
             FilledTonalButton(
-                onClick = { doSeek(startSec) },
-                enabled = prepared,
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp),
-            ) { Text("|«", style = MaterialTheme.typography.titleSmall) }
+                onClick = {
+                    val prev = keyframes.filter { it < posSec - 0.05 }.maxOrNull() ?: 0.0
+                    doSeek(prev)
+                },
+                enabled = prepared && keyframes.isNotEmpty(),
+                contentPadding = btnPadding,
+            ) { Text("«|", style = MaterialTheme.typography.titleSmall) }
+            // ② 设置开始：segment.start = playhead
             FilledTonalButton(
-                onClick = { onSetStart(posMs / 1000.0) },
+                onClick = { onSetStart(posSec) },
                 enabled = prepared,
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp),
-            ) { Text("[ 起点", style = MaterialTheme.typography.labelMedium) }
+                contentPadding = btnPadding,
+            ) { Text("[ 开始", style = MaterialTheme.typography.labelMedium) }
+            // ③ 播放/暂停（正中央）
             FilledIconButton(onClick = { togglePlay() }, enabled = prepared) {
                 if (playing) {
                     Text("❚❚", style = MaterialTheme.typography.labelMedium)
@@ -464,17 +482,28 @@ fun VideoPlayerPanel(
                     Icon(Icons.Default.PlayArrow, contentDescription = "播放")
                 }
             }
+            // ④ 设置结束：segment.end = playhead
             FilledTonalButton(
-                onClick = { onSetEnd(posMs / 1000.0) },
+                onClick = { onSetEnd(posSec) },
                 enabled = prepared,
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp),
-            ) { Text("终点 ]", style = MaterialTheme.typography.labelMedium) }
+                contentPadding = btnPadding,
+            ) { Text("结束 ]", style = MaterialTheme.typography.labelMedium) }
+            // ⑤ 下一关键帧：只移动播放位置，不改切点
             FilledTonalButton(
-                onClick = { doSeek((endSec - 0.05).coerceAtLeast(0.0)) },
-                enabled = prepared,
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp),
-            ) { Text("»|", style = MaterialTheme.typography.titleSmall) }
+                onClick = {
+                    val next = keyframes.filter { it > posSec + 0.05 }.minOrNull()
+                        ?: (durMs / 1000.0)
+                    doSeek(next)
+                },
+                enabled = prepared && keyframes.isNotEmpty(),
+                contentPadding = btnPadding,
+            ) { Text("|»", style = MaterialTheme.typography.titleSmall) }
         }
+        Text(
+            "«| »| 只移动播放位置；[ 开始 / 结束 ] 设定剪辑区间",
+            style = MaterialTheme.typography.labelSmall,
+            color = BlExt.textSecondary,
+        )
     }
 }
 
