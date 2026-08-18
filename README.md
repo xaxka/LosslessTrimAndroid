@@ -18,6 +18,7 @@
 ## 技术栈
 
 - Kotlin + Jetpack Compose（Material 3）
+- UI 遵循 **Blue Light UI** 设计系统：固定浅色（冷白底 × 白卡 1dp 描边 × 浅蓝主强调 × 语义状态色），无阴影卡片、统一空状态、统计卡结果页
 - [ffmpeg-kit 社区维护版 fork](https://github.com/sk3llo/ffmpeg-kit-flutter)（`com.antonkarpenko:ffmpeg-kit-min`，官方 ffmpeg-kit 已归档）
 - SAF 存储访问（`saf:` 协议直接读写，无需 `MANAGE_EXTERNAL_STORAGE`）
 - DataStore 参数记忆、前台 Service（dataSync）串行队列
