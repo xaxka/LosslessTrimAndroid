@@ -93,13 +93,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             f.map { EntryStatus(it, TrimPlanner.logicalPlan(it, s, o[it.docUri]), o[it.docUri]) }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    /** 当前模式参数整体是否合法 */
+    /** 当前模式参数整体是否合法（区间模式 -1 = 不切，视为合法） */
     val paramsValid: StateFlow<Boolean> = settings.map { s ->
         when (s.mode) {
             TrimMode.HEAD_TAIL -> s.headSec >= 0 && s.tailSec >= 0
-            TrimMode.INTERVAL -> s.intervalStartSec < s.intervalEndSec
+            TrimMode.INTERVAL -> s.intervalStartSec < 0 || s.intervalEndSec < 0 ||
+                    s.intervalStartSec < s.intervalEndSec
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
+    /** 是否单文件模式（无目录权限，只能另存为） */
+    val isSingleFile: Boolean
+        get() = _files.value.size == 1 && _files.value.first().isSingleFile
 
     val processableCount: StateFlow<Int> =
         statuses.map { st -> st.count { it.plan.ok } }
@@ -139,6 +144,40 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         rescan()
     }
 
+    /** 单文件编辑：直接探测该文件并进入列表（覆盖模式不可用，处理时另存为） */
+    fun onSingleFilePicked(uri: Uri) {
+        _treeUri.value = null
+        _scanning.value = true
+        _scanMsg.value = null
+        scanJob?.cancel()
+        scanJob = viewModelScope.launch {
+            try {
+                val probe = com.xixka.losslesstrim.ffmpeg.Probe.probeMedia(getApplication(), uri)
+                val name = DocUtils.queryDisplayName(getApplication(), uri)
+                    ?: uri.lastPathSegment?.substringAfterLast('/') ?: "video"
+                val entry = VideoEntry(
+                    treeUri = uri,
+                    folderUri = null,
+                    docUri = uri,
+                    name = name,
+                    sizeBytes = DocUtils.length(getApplication(), uri).coerceAtLeast(0),
+                    probe = probe,
+                )
+                _files.value = listOf(entry)
+                _scanMsg.value = if (probe.probeOk) {
+                    "单文件：$name"
+                } else {
+                    "该文件不可处理（${probe.error ?: "解析失败"}）"
+                }
+            } catch (e: Exception) {
+                _files.value = emptyList()
+                _scanMsg.value = "读取失败：${e.message}"
+            } finally {
+                _scanning.value = false
+            }
+        }
+    }
+
     fun rescan() {
         val tree = _treeUri.value ?: return
         scanJob?.cancel()
@@ -175,11 +214,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         updateSettings { it.copy(overwriteConfirmed = true) }
     }
 
-    fun startBatch() {
+    fun startBatch(outputUri: Uri? = null) {
         val s = settings.value
         val st = statuses.value.filter { it.plan.ok }
         if (st.isEmpty()) return
-        val jobs = st.map { TrimJob(it.entry, s, it.override?.takeIf { o -> !o.isEmpty }) }
+        val single = outputUri
+        val jobs = st.map {
+            TrimJob(
+                it.entry, s,
+                it.override?.takeIf { o -> !o.isEmpty },
+                outputUri = if (single != null && it.entry.isSingleFile) single else null,
+            )
+        }
         TrimController.start(getApplication(), jobs)
     }
 

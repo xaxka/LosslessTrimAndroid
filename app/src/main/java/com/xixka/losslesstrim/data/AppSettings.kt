@@ -21,10 +21,10 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 
 data class AppSettings(
     val mode: TrimMode = TrimMode.HEAD_TAIL,
-    val headSec: Double = 90.0,
-    val tailSec: Double = 60.0,
-    val intervalStartSec: Double = 300.0,
-    val intervalEndSec: Double = 2700.0,
+    val headSec: Double = 0.0,          // 默认 0 = 不切
+    val tailSec: Double = 0.0,          // 默认 0 = 不切
+    val intervalStartSec: Double = -1.0, // -1 = 不切（起点归一化为 0）
+    val intervalEndSec: Double = -1.0,   // -1 = 不切（终点归一化为片长）
     val alignment: AlignStrategy = AlignStrategy.CUT_MORE,
     val container: OutputContainer = OutputContainer.KEEP,
     val overwrite: Boolean = true,
@@ -55,10 +55,10 @@ class SettingsRepository(private val context: Context) {
     val settings: Flow<AppSettings> = context.dataStore.data.map { p ->
         AppSettings(
             mode = p[Keys.MODE]?.let { TrimMode.entries.getOrNull(it) } ?: TrimMode.HEAD_TAIL,
-            headSec = p[Keys.HEAD] ?: 90.0,
-            tailSec = p[Keys.TAIL] ?: 60.0,
-            intervalStartSec = p[Keys.INTERVAL_START] ?: 300.0,
-            intervalEndSec = p[Keys.INTERVAL_END] ?: 2700.0,
+            headSec = p[Keys.HEAD] ?: 0.0,
+            tailSec = p[Keys.TAIL] ?: 0.0,
+            intervalStartSec = p[Keys.INTERVAL_START] ?: -1.0,
+            intervalEndSec = p[Keys.INTERVAL_END] ?: -1.0,
             alignment = p[Keys.ALIGNMENT]?.let { AlignStrategy.entries.getOrNull(it) } ?: AlignStrategy.CUT_MORE,
             container = p[Keys.CONTAINER]?.let { OutputContainer.entries.getOrNull(it) } ?: OutputContainer.KEEP,
             overwrite = p[Keys.OVERWRITE] ?: true,
@@ -80,10 +80,10 @@ class SettingsRepository(private val context: Context) {
         context.dataStore.edit { p ->
             val cur = AppSettings(
                 mode = p[Keys.MODE]?.let { TrimMode.entries.getOrNull(it) } ?: TrimMode.HEAD_TAIL,
-                headSec = p[Keys.HEAD] ?: 90.0,
-                tailSec = p[Keys.TAIL] ?: 60.0,
-                intervalStartSec = p[Keys.INTERVAL_START] ?: 300.0,
-                intervalEndSec = p[Keys.INTERVAL_END] ?: 2700.0,
+                headSec = p[Keys.HEAD] ?: 0.0,
+                tailSec = p[Keys.TAIL] ?: 0.0,
+                intervalStartSec = p[Keys.INTERVAL_START] ?: -1.0,
+                intervalEndSec = p[Keys.INTERVAL_END] ?: -1.0,
                 alignment = p[Keys.ALIGNMENT]?.let { AlignStrategy.entries.getOrNull(it) } ?: AlignStrategy.CUT_MORE,
                 container = p[Keys.CONTAINER]?.let { OutputContainer.entries.getOrNull(it) } ?: OutputContainer.KEEP,
                 overwrite = p[Keys.OVERWRITE] ?: true,

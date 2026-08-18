@@ -13,6 +13,8 @@ data class TrimJob(
     val entry: VideoEntry,
     val settings: AppSettings,
     val override: PerFileOverride?,
+    /** 单文件模式：另存为目标（CreateDocument 结果）；为空时走目录内 .part 流程 */
+    val outputUri: Uri? = null,
 )
 
 /** 处理页 UI 状态 */

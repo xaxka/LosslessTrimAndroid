@@ -2,7 +2,11 @@ package com.xixka.losslesstrim.ui
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.SurfaceTexture
 import android.media.MediaMetadataRetriever
+import android.media.MediaPlayer
+import android.view.Surface
+import android.view.TextureView
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -11,6 +15,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -19,13 +25,18 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedButton as OutlinedButtonM3
@@ -33,6 +44,8 @@ import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -50,6 +63,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import com.xixka.losslesstrim.ui.theme.BlExt
 import com.xixka.losslesstrim.ui.theme.BlMono
 import com.xixka.losslesstrim.ui.theme.BlSurfaceVariant
@@ -109,7 +123,7 @@ fun StatCard(count: String, label: String, color: Color, modifier: Modifier = Mo
     }
 }
 
-/** 统一空状态：72dp 图标（主色 60%）→ 标题 → 副标题 → 引导按钮 */
+/** 统一空状态：72dp 图标（主色 60%）→ 标题 → 副标题 → 两个引导按钮 */
 @Composable
 fun EmptyState(
     title: String,
@@ -118,6 +132,8 @@ fun EmptyState(
     subtitle: String? = null,
     buttonText: String? = null,
     onButtonClick: (() -> Unit)? = null,
+    button2Text: String? = null,
+    onButton2Click: (() -> Unit)? = null,
 ) {
     Column(
         modifier = modifier
@@ -146,6 +162,9 @@ fun EmptyState(
             FilledTonalButton(onClick = onButtonClick) {
                 Text(buttonText, color = MaterialTheme.colorScheme.onPrimaryContainer)
             }
+        }
+        if (button2Text != null && onButton2Click != null) {
+            BlOutlinedButton(onClick = onButton2Click) { Text(button2Text) }
         }
     }
 }
@@ -289,6 +308,171 @@ fun FramePreview(uri: android.net.Uri, tSec: Double, label: String, timeLabel: S
         Spacer(Modifier.height(4.dp))
         Text(label, style = MaterialTheme.typography.labelSmall)
         Text(timeLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+    }
+}
+
+/**
+ * 视频预览面板（LosslessCut 风格）：画面 + 五按钮（跳到起点 / 设为起点 / 播放暂停 / 设为终点 / 跳到终点）。
+ * seekRequest 用于外部（时间轴点击）驱动定位。
+ */
+@Composable
+fun VideoPlayerPanel(
+    uri: android.net.Uri,
+    startSec: Double,
+    endSec: Double,
+    onSetStart: (Double) -> Unit,
+    onSetEnd: (Double) -> Unit,
+    seekRequest: Long,          // 毫秒时间戳，变化时 seek 到其值（时间戳即目标位置 ms）
+) {
+    val context = LocalContext.current
+    var playing by remember { mutableStateOf(false) }
+    var prepared by remember { mutableStateOf(false) }
+    var posMs by remember { mutableStateOf(0L) }
+    var durMs by remember { mutableStateOf(0L) }
+
+    val player = remember(uri) { MediaPlayer() }
+    var texView by remember { mutableStateOf<TextureView?>(null) }
+
+    DisposableEffect(uri) {
+        player.setOnPreparedListener { mp ->
+            prepared = true
+            durMs = mp.duration.toLong().coerceAtLeast(0)
+            mp.seekTo((startSec * 1000).toInt().coerceAtLeast(0))
+            posMs = (startSec * 1000).toLong().coerceAtLeast(0)
+        }
+        player.setOnCompletionListener { it.seekTo((startSec * 1000).toInt().coerceAtLeast(0)); playing = false }
+        player.setDataSource(context, uri)
+        player.prepareAsync()
+        onDispose {
+            try {
+                player.stop()
+            } catch (_: Exception) {
+            }
+            player.release()
+        }
+    }
+
+    // 播放中轮询位置
+    LaunchedEffect(playing, prepared) {
+        while (playing && prepared) {
+            posMs = try { player.currentPosition.toLong() } catch (_: Exception) { posMs }
+            kotlinx.coroutines.delay(200)
+        }
+    }
+
+    // 外部 seek（时间轴点击）
+    LaunchedEffect(seekRequest) {
+        if (seekRequest >= 0 && prepared) {
+            try {
+                player.seekTo(seekRequest.toInt())
+                posMs = seekRequest
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun doSeek(sec: Double) {
+        val ms = (sec * 1000).toLong().coerceIn(0L, if (durMs > 0) durMs else Long.MAX_VALUE)
+        try {
+            player.seekTo(ms.toInt())
+            posMs = ms
+        } catch (_: Exception) {
+        }
+    }
+
+    fun togglePlay() {
+        if (!prepared) return
+        try {
+            if (playing) {
+                player.pause()
+                playing = false
+            } else {
+                // 超出保留区则先回到起点
+                if (posMs < startSec * 1000 || (endSec * 1000 > 0 && posMs > endSec * 1000)) {
+                    doSeek(startSec)
+                }
+                player.start()
+                playing = true
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        // 画面
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(16f / 9f)
+                .clip(MaterialTheme.shapes.medium)
+                .background(Color.Black),
+            contentAlignment = Alignment.Center,
+        ) {
+            AndroidView(
+                factory = { ctx ->
+                    TextureView(ctx).also { tv ->
+                        tv.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                            override fun onSurfaceTextureAvailable(st: android.graphics.SurfaceTexture, w: Int, h: Int) {
+                                try { player.setSurface(Surface(st)) } catch (_: Exception) {}
+                            }
+                            override fun onSurfaceTextureSizeChanged(st: android.graphics.SurfaceTexture, w: Int, h: Int) {}
+                            override fun onSurfaceTextureDestroyed(st: android.graphics.SurfaceTexture): Boolean {
+                                try { player.setSurface(null) } catch (_: Exception) {}
+                                return true
+                            }
+                            override fun onSurfaceTextureUpdated(st: android.graphics.SurfaceTexture) {}
+                        }
+                        texView = tv
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+            if (!prepared) {
+                Text("加载视频中…", color = Color.White, style = MaterialTheme.typography.labelMedium)
+            } else {
+                // 当前位置角标
+                Text(
+                    "${Formats.ms(posMs)} / ${Formats.ms(durMs)}",
+                    color = Color.White.copy(alpha = 0.9f),
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(8.dp)
+                        .background(Color.Black.copy(alpha = 0.45f))
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        // 五按钮
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            IconButton(onClick = { doSeek(startSec) }, enabled = prepared) {
+                Icon(Icons.Default.SkipPrevious, contentDescription = "跳到起点")
+            }
+            FilledTonalButton(
+                onClick = { onSetStart(posMs / 1000.0) },
+                enabled = prepared,
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp),
+            ) { Text("[ 起点", style = MaterialTheme.typography.labelMedium) }
+            FilledIconButton(onClick = { togglePlay() }, enabled = prepared) {
+                Icon(
+                    if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    contentDescription = if (playing) "暂停" else "播放",
+                )
+            }
+            FilledTonalButton(
+                onClick = { onSetEnd(posMs / 1000.0) },
+                enabled = prepared,
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp),
+            ) { Text("终点 ]", style = MaterialTheme.typography.labelMedium) }
+            IconButton(
+                onClick = { doSeek((endSec - 0.05).coerceAtLeast(0.0)) },
+                enabled = prepared,
+            ) { Icon(Icons.Default.SkipNext, contentDescription = "跳到终点") }
+        }
     }
 }
 

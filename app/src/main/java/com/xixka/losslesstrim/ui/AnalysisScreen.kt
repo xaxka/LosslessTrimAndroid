@@ -2,6 +2,7 @@ package com.xixka.losslesstrim.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,13 +28,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -46,7 +47,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.xixka.losslesstrim.data.PerFileOverride
 import com.xixka.losslesstrim.data.TrimMode
@@ -61,7 +61,7 @@ import com.xixka.losslesstrim.util.Formats
 import java.util.Locale
 import kotlin.math.abs
 
-/** 单文件分析视图：时间轴 + 关键帧 + 切点抽帧 + 轨道勾选 */
+/** 单文件分析视图：视频预览（五按钮）+ 时间轴 + 关键帧 + 切点抽帧 + 轨道勾选 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
@@ -79,16 +79,20 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
     fun fmtSec(v: Double): String =
         if (v == v.toLong().toDouble()) v.toLong().toString() else String.format(Locale.US, "%.1f", v)
 
+    // 区间模式 -1（不切）原样显示
+    fun initIntervalText(v: Double): String = if (v < 0) "-1" else Formats.clock(v)
+
     var headText by remember { mutableStateOf(fmtSec(savedOverride?.headSec ?: settings.headSec)) }
     var tailText by remember { mutableStateOf(fmtSec(savedOverride?.tailSec ?: settings.tailSec)) }
-    var startText by remember { mutableStateOf(Formats.clock(savedOverride?.intervalStartSec ?: settings.intervalStartSec)) }
-    var endText by remember { mutableStateOf(Formats.clock(savedOverride?.intervalEndSec ?: settings.intervalEndSec)) }
+    var startText by remember { mutableStateOf(initIntervalText(savedOverride?.intervalStartSec ?: settings.intervalStartSec)) }
+    var endText by remember { mutableStateOf(initIntervalText(savedOverride?.intervalEndSec ?: settings.intervalEndSec)) }
     var dropped by remember { mutableStateOf(savedOverride?.droppedStreams ?: emptySet<Int>()) }
 
-    val head = Formats.parseSeconds(headText) ?: settings.headSec
-    val tail = Formats.parseSeconds(tailText) ?: settings.tailSec
-    val start = Formats.parseTime(startText) ?: settings.intervalStartSec
-    val end = Formats.parseTime(endText) ?: settings.intervalEndSec
+    val head = (Formats.parseSeconds(headText) ?: settings.headSec).coerceAtLeast(0.0)
+    val tail = (Formats.parseSeconds(tailText) ?: settings.tailSec).coerceAtLeast(0.0)
+    val start = (Formats.parseTime(startText) ?: settings.intervalStartSec).coerceAtLeast(0.0)
+    val endRaw = Formats.parseTime(endText) ?: settings.intervalEndSec
+    val end = if (endRaw < 0) dur else endRaw
 
     val kfs = keyframes ?: emptyList()
     val plan = remember(head, tail, start, end, settings, kfs) {
@@ -98,6 +102,9 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
             kfs
         )
     }
+
+    // 视频面板 seek 请求（时间戳，<0 忽略）
+    var seekReq by remember { mutableLongStateOf(-1L) }
 
     fun onDragPoint(isStart: Boolean, t: Double) {
         val clamped = t.coerceIn(0.0, dur)
@@ -113,11 +120,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                title = {
-                    Column {
-                        MonoText(entry.name)
-                    }
-                },
+                title = { MonoText(entry.name) },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.background
                 ),
@@ -137,15 +140,27 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            SectionCard(
-                title = "文件信息",
-                subtitle = "时长 ${Formats.clock(dur)} · 大小 ${Formats.size(entry.sizeBytes)} · " +
-                        (entry.probe.videoCodec ?: "?") + " · " + entry.probe.formatName.substringBefore(','),
-            ) {}
+            // ---------- 视频预览面板（LosslessCut 五按钮） ----------
+            VideoPlayerPanel(
+                uri = entry.docUri,
+                startSec = plan.requestedStart,
+                endSec = plan.requestedEnd,
+                onSetStart = { pos ->
+                    // 头尾模式：起点按钮 = 设置片头；区间模式：直接设开始
+                    if (settings.mode == TrimMode.HEAD_TAIL) headText = fmtSec(pos.coerceIn(0.0, dur))
+                    else startText = Formats.clock(pos.coerceIn(0.0, dur))
+                },
+                onSetEnd = { pos ->
+                    if (settings.mode == TrimMode.HEAD_TAIL) tailText = fmtSec((dur - pos).coerceIn(0.0, dur))
+                    else endText = Formats.clock(pos.coerceIn(0.0, dur))
+                },
+                seekRequest = seekReq,
+            )
 
+            // ---------- 时间轴 ----------
             SectionCard(
                 title = "时间轴与切点",
-                subtitle = "橙线 = 关键帧（无损剪辑的物理边界）；红线 = 关键帧对齐后的实际切点；拖动圆点微调",
+                subtitle = "点击时间轴定位播放；拖动圆点调整切点。橙线 = 关键帧（无损剪辑物理边界）；红线 = 对齐后实际切点",
             ) {
                 if (keyframes == null) {
                     LinearProgressIndicator(
@@ -167,23 +182,26 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                     actStart = plan.actualStart,
                     actEnd = plan.actualEnd,
                     onDragPoint = { isStart, t -> onDragPoint(isStart, t) },
+                    onSeek = { t -> seekReq = (t * 1000).toLong() },
                 )
                 if (settings.mode == TrimMode.HEAD_TAIL) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
                             value = headText,
                             onValueChange = { headText = it },
-                            label = { Text("距片头(秒)") },
+                            label = { Text("片头(秒)") },
+                            supportingText = { Text("0 = 不切") },
                             singleLine = true,
-                            isError = Formats.parseSeconds(headText) == null,
+                            isError = (Formats.parseSeconds(headText) ?: -1.0) < 0,
                             modifier = Modifier.weight(1f),
                         )
                         OutlinedTextField(
                             value = tailText,
                             onValueChange = { tailText = it },
-                            label = { Text("距片尾(秒)") },
+                            label = { Text("片尾(秒)") },
+                            supportingText = { Text("0 = 不切") },
                             singleLine = true,
-                            isError = Formats.parseSeconds(tailText) == null,
+                            isError = (Formats.parseSeconds(tailText) ?: -1.0) < 0,
                             modifier = Modifier.weight(1f),
                         )
                     }
@@ -193,6 +211,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                             value = startText,
                             onValueChange = { startText = it },
                             label = { Text("开始(分:秒)") },
+                            supportingText = { Text("-1 = 从头") },
                             singleLine = true,
                             isError = start >= end,
                             modifier = Modifier.weight(1f),
@@ -201,8 +220,8 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                             value = endText,
                             onValueChange = { endText = it },
                             label = { Text("结束(分:秒)") },
+                            supportingText = { Text("-1 = 到片尾") },
                             singleLine = true,
-                            isError = start >= end,
                             modifier = Modifier.weight(1f),
                         )
                     }
@@ -221,7 +240,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                             append("（${if (dE >= 0) "+" else ""}${String.format(Locale.US, "%.1f", dE)}s）\n")
                             append("保留时长 ≈ ").append(Formats.clock(plan.duration))
                             if (plan.truncated) append("（终点超片长已截断）")
-                            if (kfs.isEmpty()) append("\n（无关键帧信息：音频文件或索引缺失，切点不做对齐）")
+                            if (kfs.isEmpty()) append("\n（无关键帧信息：切点不做对齐）")
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = BlExt.textSecondary,
@@ -235,8 +254,9 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                 }
             }
 
+            // ---------- 切点抽帧 ----------
             if (plan.ok) {
-                SectionCard(title = "切点抽帧确认", subtitle = "肉眼确认切的位置对不对") {
+                SectionCard(title = "切点抽帧确认") {
                     Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         FramePreview(
                             uri = entry.docUri,
@@ -254,7 +274,8 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                 }
             }
 
-            SectionCard(title = "轨道", subtitle = "勾选保留，默认全保留；未动过的文件按全保留处理") {
+            // ---------- 轨道 ----------
+            SectionCard(title = "轨道", subtitle = "勾选保留，默认全保留") {
                 entry.probe.streams.forEach { s ->
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -297,8 +318,8 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                         val o = PerFileOverride(
                             headSec = if (head == settings.headSec) null else head,
                             tailSec = if (tail == settings.tailSec) null else tail,
-                            intervalStartSec = if (start == settings.intervalStartSec) null else start,
-                            intervalEndSec = if (end == settings.intervalEndSec) null else end,
+                            intervalStartSec = if (start == (settings.intervalStartSec.coerceAtLeast(0.0))) null else start,
+                            intervalEndSec = if (endRaw == settings.intervalEndSec) null else endRaw,
                             droppedStreams = dropped,
                         )
                         vm.setOverride(entry.docUri, o)
@@ -319,7 +340,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
     }
 }
 
-/** 时间轴：关键帧（橙）+ 保留区（蓝）+ 实际切点（红）+ 可拖动手柄 */
+/** 时间轴：关键帧（橙）+ 保留区（蓝）+ 实际切点（红）+ 拖动手柄 + 点击定位 */
 @Composable
 fun TimelineBar(
     dur: Double,
@@ -329,6 +350,7 @@ fun TimelineBar(
     actStart: Double,
     actEnd: Double,
     onDragPoint: (isStart: Boolean, t: Double) -> Unit,
+    onSeek: (Double) -> Unit,
 ) {
     var widthPx by remember { mutableStateOf(0f) }
     var draggingStart by remember { mutableStateOf(true) }
@@ -338,6 +360,13 @@ fun TimelineBar(
             Modifier
                 .fillMaxWidth()
                 .height(72.dp)
+                .pointerInput(dur) {
+                    detectTapGestures { offset ->
+                        if (widthPx > 0 && dur > 0) {
+                            onSeek((offset.x / widthPx * dur).coerceIn(0.0, dur))
+                        }
+                    }
+                }
                 .pointerInput(dur) {
                     detectDragGestures(
                         onDragStart = { offset ->
@@ -367,14 +396,12 @@ fun TimelineBar(
                 val trackTop = (h - 32f) / 2f
                 fun x(t: Double): Float = (t / dur * w).toFloat().coerceIn(0f, w)
 
-                // 轨道底（surfaceVariant）
                 drawRoundRect(
                     color = BlSurfaceVariant,
                     topLeft = Offset(0f, trackTop),
                     size = Size(w, 32f),
                     cornerRadius = CornerRadius(16f, 16f),
                 )
-                // 保留区（设定，primary 55%）
                 val rx0 = x(reqStart)
                 val rx1 = x(reqEnd)
                 if (rx1 > rx0) {
@@ -384,7 +411,6 @@ fun TimelineBar(
                         size = Size(rx1 - rx0, 32f),
                     )
                 }
-                // 关键帧（warning 橙）
                 val step = if (keyframes.size > 1500) keyframes.size / 1500 + 1 else 1
                 var i = 0
                 while (i < keyframes.size) {
@@ -397,10 +423,8 @@ fun TimelineBar(
                     )
                     i += step
                 }
-                // 实际切点（error 红）
                 drawLine(BlExt.error, Offset(x(actStart), 4f), Offset(x(actStart), h - 4f), 2f)
                 drawLine(BlExt.error, Offset(x(actEnd), 4f), Offset(x(actEnd), h - 4f), 2f)
-                // 拖动手柄（secondary）
                 drawCircle(BlSecondary, radius = 11f, center = Offset(x(reqStart), h / 2))
                 drawCircle(BlSecondary, radius = 11f, center = Offset(x(reqEnd), h / 2))
                 drawCircle(Color.White, radius = 4f, center = Offset(x(reqStart), h / 2))

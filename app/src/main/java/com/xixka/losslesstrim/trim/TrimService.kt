@@ -195,28 +195,58 @@ class TrimService : Service() {
             return FileResult(entry, plan, Outcome.SKIPPED, entry.sizeBytes, reason = plan.skipReason)
         }
 
-        // 3. 输出容器
+        // 5. 输出目标：单文件另存为 / 目录内 .part 流程
         val target = Containers.resolve(s.container, entry.ext)
             ?: return FileResult(
                 entry, plan, Outcome.FAILED, entry.sizeBytes,
                 reason = "不支持的容器 .${entry.ext}，请改用 MP4/MKV 输出"
             )
 
-        // 4. 轨道映射（按勾选逐轨 -map 0:i）
+        // 轨道映射（按勾选逐轨 -map 0:i）
         val dropped = job.override?.droppedStreams ?: emptySet()
         val kept = entry.probe.streams.map { it.index }.filter { it !in dropped }
         if (kept.isEmpty()) {
             return FileResult(entry, plan, Outcome.FAILED, entry.sizeBytes, reason = "未保留任何轨道")
         }
 
-        // 5. 输出目录与目标文件名
+        val inParam = FFmpegKitConfig.getSafParameterForRead(this, entry.docUri)
+        val durSec = plan.duration
+
+        // ---- 单文件模式：直接写另存目标（无目录写权限，不走 .part/rename） ----
+        if (job.outputUri != null) {
+            val outParam = FFmpegKitConfig.getSafParameterForWrite(this, job.outputUri)
+            val cmd = buildCommand(inParam, outParam, plan, kept, target)
+            val session = runFfmpeg(cmd) { timeMs, speed ->
+                val p = (timeMs / 1000.0 / durSec).toFloat().coerceIn(0f, 1f)
+                publishRunning(idx, total, entry.name, p, String.format(Locale.US, "%.1fx", speed))
+            }
+            val rc = session?.returnCode
+            if (rc == null || !rc.isValueSuccess || TrimController.cancelRequested) {
+                DocUtils.delete(this, job.outputUri)
+                return FileResult(
+                    entry, plan,
+                    if (rc != null && rc.isValueCancel) Outcome.CANCELLED else Outcome.FAILED,
+                    entry.sizeBytes,
+                    reason = if (rc == null) "ffmpeg 会话异常结束" else extractError(session!!)
+                )
+            }
+            val newSize = DocUtils.length(this, job.outputUri).coerceAtLeast(0)
+            publishRunning(idx + 1, total, entry.name, 1f, "")
+            return FileResult(entry, plan, Outcome.SUCCESS, entry.sizeBytes, newSize, reason = "已另存为新文件")
+        }
+
+        // ---- 目录模式：输出目录与目标文件名 ----
         val outFolder: Uri
         val finalName: String
         if (s.overwrite) {
-            outFolder = entry.folderUri
+            outFolder = entry.folderUri ?: return FileResult(
+                entry, plan, Outcome.FAILED, entry.sizeBytes, reason = "缺少目录权限"
+            )
             finalName = if (target.ext == entry.ext) entry.name else "${entry.baseName}.${target.ext}"
         } else {
-            val cutDir = ensureCutDir(entry.folderUri)
+            val cutDir = ensureCutDir(entry.folderUri ?: return FileResult(
+                entry, plan, Outcome.FAILED, entry.sizeBytes, reason = "缺少目录权限"
+            ))
                 ?: return FileResult(
                     entry, plan, Outcome.FAILED, entry.sizeBytes,
                     reason = "无法创建/访问 CutVideos 子目录"
@@ -235,10 +265,8 @@ class TrimService : Service() {
             )
 
         // 7. 执行 ffmpeg（stream copy）
-        val inParam = FFmpegKitConfig.getSafParameterForRead(this, entry.docUri)
         val outParam = FFmpegKitConfig.getSafParameterForWrite(this, partUri)
         val cmd = buildCommand(inParam, outParam, plan, kept, target)
-        val durSec = plan.duration
         val session = runFfmpeg(cmd) { timeMs, speed ->
             val p = (timeMs / 1000.0 / durSec).toFloat().coerceIn(0f, 1f)
             publishRunning(idx, total, entry.name, p, String.format(Locale.US, "%.1fx", speed))

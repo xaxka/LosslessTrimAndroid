@@ -66,13 +66,14 @@ data class ProbeResult(
 
 /** 列表里的一条视频 */
 data class VideoEntry(
-    val treeUri: Uri,      // 选中的根目录 tree uri
-    val folderUri: Uri,    // 所在文件夹的 document uri（可能与 treeUri 不同，子目录时）
+    val treeUri: Uri,      // 选中的根目录 tree uri（单文件模式 = 文件自身 uri）
+    val folderUri: Uri?,   // 所在文件夹（tree 作用域内）；单文件模式为 null → 只能另存为
     val docUri: Uri,       // 文件本身的 document uri
     val name: String,      // 显示名（含扩展名）
     val sizeBytes: Long,
     val probe: ProbeResult,
 ) {
+    val isSingleFile: Boolean get() = folderUri == null
     val baseName: String get() = name.substringBeforeLast('.', name)
     val ext: String get() = name.substringAfterLast('.', "").lowercase()
 }

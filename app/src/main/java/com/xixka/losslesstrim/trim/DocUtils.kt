@@ -74,6 +74,20 @@ object DocUtils {
         }
     }
 
+    /** 查询 DISPLAY_NAME（单文件模式取文件名） */
+    fun queryDisplayName(context: Context, uri: Uri): String? {
+        return try {
+            context.contentResolver.query(
+                uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
+                null, null, null
+            )?.use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     /** 流拷贝兜底（rename 失败时用） */
     fun copyTo(context: Context, srcUri: Uri, folderUri: Uri, mime: String, displayName: String): Uri? {
         return try {

@@ -32,8 +32,11 @@ object TrimPlanner {
                 }
             }
             TrimMode.INTERVAL -> {
-                val start = o?.intervalStartSec ?: s.intervalStartSec
-                val end = o?.intervalEndSec ?: s.intervalEndSec
+                // 负值（-1）= 不切：起点归一化为 0，终点归一化为片长
+                val rawStart = o?.intervalStartSec ?: s.intervalStartSec
+                val rawEnd = o?.intervalEndSec ?: s.intervalEndSec
+                val start = if (rawStart < 0) 0.0 else rawStart
+                val end = if (rawEnd < 0) dur else rawEnd
                 if (start >= end) {
                     TrimPlan(ok = false, skipReason = "参数非法：开始 ≥ 结束")
                 } else if (dur <= start) {

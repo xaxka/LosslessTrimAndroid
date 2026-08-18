@@ -25,6 +25,9 @@ object Formats {
         return String.format(Locale.US, "%02d:%02d.%d", m, ss, tenth)
     }
 
+    /** 毫秒 → "mm:ss" */
+    fun ms(millis: Long): String = clock(millis / 1000.0)
+
     /** 字节 → 可读大小 */
     fun size(bytes: Long): String {
         if (bytes < 0) return "?"
@@ -41,7 +44,7 @@ object Formats {
 
     fun mb(bytes: Long): String = String.format(Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)
 
-    /** "05:30" / "05:30.5" / "330" → 秒；非法返回 null */
+    /** "05:30" / "-1" / "330" → 秒；非法返回 null。负值保留（-1 = 不切的语义标记） */
     fun parseTime(text: String): Double? {
         val t = text.trim()
         if (t.isEmpty()) return null
@@ -50,16 +53,14 @@ object Formats {
         var sec = 0.0
         for (p in parts) {
             val v = p.toDoubleOrNull() ?: return null
-            if (v < 0) return null
             sec = sec * 60 + v
         }
         return sec
     }
 
-    /** 纯秒数字段（头尾时长），支持小数；非法返回 null */
+    /** 纯秒数字段（头尾时长），支持小数与负值；非法返回 null */
     fun parseSeconds(text: String): Double? {
-        val v = text.trim().toDoubleOrNull()
-        return if (v == null || v < 0) null else v
+        return text.trim().toDoubleOrNull()
     }
 
     fun secs3(v: Double): String = String.format(Locale.US, "%.3f", v)
