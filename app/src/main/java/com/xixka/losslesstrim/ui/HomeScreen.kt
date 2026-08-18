@@ -19,7 +19,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -335,7 +335,7 @@ fun HomeScreen(
                     Spacer(Modifier.height(16.dp))
                     ExtendedFloatingActionButton(
                         onClick = { folderLauncher.launch(null) },
-                        icon = { Icon(Icons.Default.Folder, contentDescription = null) },
+                        icon = { Icon(Icons.Default.List, contentDescription = null) },
                         text = { Text("选择文件夹") },
                     )
                 }

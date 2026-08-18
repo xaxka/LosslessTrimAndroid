@@ -5,6 +5,7 @@ import com.xixka.losslesstrim.data.AppSettings
 import com.xixka.losslesstrim.data.OutputContainer
 import com.xixka.losslesstrim.data.PerFileOverride
 import com.xixka.losslesstrim.data.TrimMode
+import com.xixka.losslesstrim.data.TrimPlan
 import com.xixka.losslesstrim.data.VideoEntry
 
 /**

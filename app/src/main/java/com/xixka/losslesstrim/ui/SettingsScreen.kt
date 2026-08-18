@@ -61,12 +61,12 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
                     label = "默认剪辑模式",
                     options = listOf("头尾裁剪", "区间保留"),
                     selected = settings.mode.ordinal,
-                ) { vm.updateSettings { it.copy(mode = TrimMode.entries[it]) } }
+                ) { idx -> vm.updateSettings { s -> s.copy(mode = TrimMode.entries[idx]) } }
                 ChoiceField(
                     label = "关键帧对齐策略",
                     options = listOf("宁多切（默认）", "宁少切", "自动"),
                     selected = settings.alignment.ordinal,
-                ) { vm.updateSettings { it.copy(alignment = AlignStrategy.entries[it]) } }
+                ) { idx -> vm.updateSettings { s -> s.copy(alignment = AlignStrategy.entries[idx]) } }
                 Text(
                     "宁多切：起点对齐后一个关键帧、终点对齐前一个（多砍一点，保证广告清零）。\n宁少切：反之，怕误伤正片。",
                     fontSize = 11.sp,
@@ -79,7 +79,7 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
                     label = "输出容器",
                     options = listOf("保持原容器", "MP4", "MKV"),
                     selected = settings.container.ordinal,
-                ) { vm.updateSettings { it.copy(container = OutputContainer.entries[it]) } }
+                ) { idx -> vm.updateSettings { s -> s.copy(container = OutputContainer.entries[idx]) } }
                 Text(
                     "只换封装和扩展名，流仍为 -c copy 不转码。MP4 会启用 faststart。\n注意：srt 字幕 / DTS 音频放进 MP4 可能失败（会明确报错，不静默丢轨），此类文件请改回 MKV 或原容器。",
                     fontSize = 11.sp,

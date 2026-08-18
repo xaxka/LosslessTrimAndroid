@@ -3,9 +3,9 @@ package com.xixka.losslesstrim.trim
 import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.os.StatFs
 import androidx.documentfile.provider.DocumentFile
 import java.io.File
-import java.io.StatFs
 
 /** SAF 文档操作（基于 DocumentsContract，folderUri 须为 tree 作用域的 document uri） */
 object DocUtils {
