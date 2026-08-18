@@ -313,6 +313,13 @@ class TrimService : Service() {
             )
         }
         if (newSize <= 0) newSize = DocUtils.length(this, finalUri).coerceAtLeast(0)
+        // 终检：最终文件实测为 0 字节（查询成功且为 0）视为失败，避免空文件冒充成功
+        if (DocUtils.length(this, finalUri) == 0L) {
+            return FileResult(
+                entry, plan, Outcome.FAILED, entry.sizeBytes,
+                reason = "输出文件异常（0 字节），请重试"
+            )
+        }
         publishRunning(idx + 1, total, entry.name, 1f, "")
         return FileResult(entry, plan, Outcome.SUCCESS, entry.sizeBytes, newSize)
     }

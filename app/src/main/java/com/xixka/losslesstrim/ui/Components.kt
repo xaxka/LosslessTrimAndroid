@@ -355,6 +355,9 @@ fun VideoPlayerPanel(
         player.setOnCompletionListener {
             it.seekTo(0)
             playing = false
+            // 播放结束回到开头：同步一次位置，否则时间轴 Playhead 卡在片尾
+            posMs = 0L
+            onPositionChange(0.0)
         }
         player.setDataSource(context, uri)
         player.prepareAsync()

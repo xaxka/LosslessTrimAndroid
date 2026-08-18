@@ -56,6 +56,8 @@ fun App() {
     }
 
     BackHandler(enabled = screen != Screen.Home) {
+        // 从结果页返回必须重扫：覆盖模式下原文件 URI 已失效（删旧建新），列表需刷新
+        if (screen == Screen.Result) vm.rescan()
         screen = Screen.Home
     }
 

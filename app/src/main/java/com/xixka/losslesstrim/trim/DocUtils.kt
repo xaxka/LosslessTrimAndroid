@@ -88,15 +88,25 @@ object DocUtils {
         }
     }
 
-    /** 流拷贝兜底（rename 失败时用） */
+    /** 流拷贝兜底（rename 失败时用）；任一流打开失败则清理目标并返回 null，绝不留下空文件冒充成功 */
     fun copyTo(context: Context, srcUri: Uri, folderUri: Uri, mime: String, displayName: String): Uri? {
         return try {
             val dst = create(context, folderUri, mime, displayName) ?: return null
-            context.contentResolver.openInputStream(srcUri)?.use { input ->
+            val input = context.contentResolver.openInputStream(srcUri)
+            if (input == null) {
+                delete(context, dst)
+                return null
+            }
+            val ok = input.use { ins ->
                 context.contentResolver.openOutputStream(dst, "w")?.use { output ->
-                    input.copyTo(output, 1024 * 256)
-                }
-            } ?: return dst
+                    ins.copyTo(output, 1024 * 256)
+                    true
+                } ?: false
+            }
+            if (!ok) {
+                delete(context, dst)
+                return null
+            }
             dst
         } catch (e: Exception) {
             null

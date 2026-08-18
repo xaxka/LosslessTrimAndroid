@@ -244,7 +244,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             .toSet()
         if (retryable.isEmpty()) return
         val s = settings.value
-        val st = statuses.value.filter { it.plan.ok && it.entry.docUri in retryable }
+        // 单文件模式无目录权限，重试需重新走另存为（本页无法提供目标），排除之
+        val st = statuses.value.filter {
+            it.plan.ok && it.entry.docUri in retryable && !it.entry.isSingleFile
+        }
         if (st.isEmpty()) return
         val jobs = st.map { TrimJob(it.entry, s, it.override?.takeIf { o -> !o.isEmpty }) }
         TrimController.start(getApplication(), jobs)

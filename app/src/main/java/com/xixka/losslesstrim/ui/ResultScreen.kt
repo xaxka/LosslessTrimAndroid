@@ -116,8 +116,19 @@ fun ResultScreen(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier.padding(vertical = 12.dp),
         ) {
-            if (failed + cancelled > 0) {
+            // 可重试 = 失败/取消 且非单文件（单文件无目录权限，需回主页重新另存为）
+            val hasRetryable = results.any {
+                (it.outcome == Outcome.FAILED || it.outcome == Outcome.CANCELLED) &&
+                        !it.entry.isSingleFile
+            }
+            if (hasRetryable) {
                 Button(onClick = onRetry) { Text("重试失败项") }
+            } else if (failed + cancelled > 0) {
+                Text(
+                    "失败项为单文件模式，请返回主页重新选择另存目标",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = BlExt.textSecondary,
+                )
             }
             BlTextButton(onClick = onBackHome) { Text("返回主页") }
         }
