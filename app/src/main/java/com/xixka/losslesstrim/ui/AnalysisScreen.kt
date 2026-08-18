@@ -239,7 +239,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                             label = { Text("开始(分:秒)") },
                             supportingText = { Text("-1 = 从头") },
                             singleLine = true,
-                            isError = start >= end,
+                            isError = Formats.parseTime(startText) == null || start >= end,
                             modifier = Modifier.weight(1f),
                         )
                         OutlinedTextField(
@@ -248,6 +248,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                             label = { Text("结束(分:秒)") },
                             supportingText = { Text("-1 = 到片尾") },
                             singleLine = true,
+                            isError = Formats.parseTime(endText) == null || start >= end,
                             modifier = Modifier.weight(1f),
                         )
                     }

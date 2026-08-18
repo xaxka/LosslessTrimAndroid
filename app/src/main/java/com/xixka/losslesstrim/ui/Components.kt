@@ -72,6 +72,7 @@ import com.xixka.losslesstrim.ui.theme.BlMono
 import com.xixka.losslesstrim.ui.theme.BlSurfaceVariant
 import com.xixka.losslesstrim.util.Formats
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /**
@@ -276,6 +277,8 @@ fun VideoThumb(uri: android.net.Uri, modifier: Modifier = Modifier) {
 fun FramePreview(uri: android.net.Uri, tSec: Double, label: String, timeLabel: String) {
     val context = LocalContext.current
     val bmp by produceState<Bitmap?>(null, uri, tSec) {
+        // 拖动切点时 tSec 高频变化：先挂起 200ms，跳过中间值只抽最后一帧
+        delay(200)
         value = withContext(Dispatchers.IO) {
             val mmr = MediaMetadataRetriever()
             try {

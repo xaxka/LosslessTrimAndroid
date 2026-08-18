@@ -15,14 +15,16 @@ object Formats {
         else String.format(Locale.US, "%02d:%02d", m, ss)
     }
 
-    /** 秒 → "01:23.5"（分:秒.小数） */
+    /** 秒 → "01:23:45.5"（≥1 小时含小时段，与 clock 口径一致；不足 1 小时为 "03:25.4"） */
     fun clockMs(sec: Double): String {
         val s = sec.coerceAtLeast(0.0)
         val total = s.toLong()
-        val m = total / 60
+        val h = total / 3600
+        val m = (total % 3600) / 60
         val ss = total % 60
         val tenth = ((s - total) * 10).toInt().coerceIn(0, 9)
-        return String.format(Locale.US, "%02d:%02d.%d", m, ss, tenth)
+        return if (h > 0) String.format(Locale.US, "%02d:%02d:%02d.%d", h, m, ss, tenth)
+        else String.format(Locale.US, "%02d:%02d.%d", m, ss, tenth)
     }
 
     /** 毫秒 → "mm:ss" */
@@ -58,15 +60,17 @@ object Formats {
 
     fun mb(bytes: Long): String = String.format(Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)
 
-    /** "05:30" / "-1" / "330" → 秒；非法返回 null。负值保留（-1 = 不切的语义标记） */
+    /** "05:30" / "-1" / "330" → 秒；非法返回 null。"-1" 为不切哨兵（仅裸 "-1"），其余负值/空段非法 */
     fun parseTime(text: String): Double? {
         val t = text.trim()
         if (t.isEmpty()) return null
+        if (t == "-1") return -1.0
         val parts = t.split(":")
         if (parts.size > 3) return null
         var sec = 0.0
         for (p in parts) {
-            val v = p.toDoubleOrNull() ?: return null
+            val v = p.trim().toDoubleOrNull() ?: return null
+            if (v < 0) return null
             sec = sec * 60 + v
         }
         return sec
