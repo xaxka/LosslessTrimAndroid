@@ -22,8 +22,9 @@ object TrimPlanner {
         val dur = entry.probe.durationSec
         return when (s.mode) {
             TrimMode.HEAD_TAIL -> {
-                val head = (o?.headSec ?: s.headSec).coerceAtLeast(0.0)
-                val tail = (o?.tailSec ?: s.tailSec).coerceAtLeast(0.0)
+                // 片头/片尾每视频单独设置（PerFileOverride），无设置时默认 0 = 不切
+                val head = (o?.headSec ?: 0.0).coerceAtLeast(0.0)
+                val tail = (o?.tailSec ?: 0.0).coerceAtLeast(0.0)
                 if (head + tail >= dur) {
                     TrimPlan(ok = false, skipReason = "剪完将为空（片头${head}s + 片尾${tail}s ≥ 总时长）")
                 } else {

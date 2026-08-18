@@ -87,30 +87,13 @@ fun HomeScreen(
 
     val isSingle = vm.isSingleFile
 
-    fun numToStr(v: Double): String =
-        if (v == v.toLong().toDouble()) v.toLong().toString() else v.toString()
-
     fun intervalToStr(v: Double): String = if (v < 0) "-1" else Formats.clock(v)
 
-    var headText by remember { mutableStateOf(numToStr(settings.headSec)) }
-    var headSync by remember { mutableStateOf(settings.headSec) }
-    var tailText by remember { mutableStateOf(numToStr(settings.tailSec)) }
-    var tailSync by remember { mutableStateOf(settings.tailSec) }
     var startText by remember { mutableStateOf(intervalToStr(settings.intervalStartSec)) }
     var startSync by remember { mutableStateOf(settings.intervalStartSec) }
     var endText by remember { mutableStateOf(intervalToStr(settings.intervalEndSec)) }
     var endSync by remember { mutableStateOf(settings.intervalEndSec) }
 
-    LaunchedEffect(settings.headSec) {
-        if (headSync != settings.headSec) {
-            headText = numToStr(settings.headSec); headSync = settings.headSec
-        }
-    }
-    LaunchedEffect(settings.tailSec) {
-        if (tailSync != settings.tailSec) {
-            tailText = numToStr(settings.tailSec); tailSync = settings.tailSec
-        }
-    }
     LaunchedEffect(settings.intervalStartSec) {
         if (startSync != settings.intervalStartSec) {
             startText = intervalToStr(settings.intervalStartSec); startSync = settings.intervalStartSec
@@ -258,39 +241,14 @@ fun HomeScreen(
                 title = null,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
             ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (settings.mode == TrimMode.HEAD_TAIL) {
-                        OutlinedTextField(
-                            value = headText,
-                            onValueChange = {
-                                headText = it
-                                Formats.parseSeconds(it)?.let { v ->
-                                    headSync = v
-                                    vm.updateSettings { s -> s.copy(headSec = v) }
-                                }
-                            },
-                            label = { Text("片头(秒)") },
-                            supportingText = { Text("0 = 不切") },
-                            singleLine = true,
-                            isError = (Formats.parseSeconds(headText) ?: Double.NaN) < 0,
-                            modifier = Modifier.weight(1f),
-                        )
-                        OutlinedTextField(
-                            value = tailText,
-                            onValueChange = {
-                                tailText = it
-                                Formats.parseSeconds(it)?.let { v ->
-                                    tailSync = v
-                                    vm.updateSettings { s -> s.copy(tailSec = v) }
-                                }
-                            },
-                            label = { Text("片尾(秒)") },
-                            supportingText = { Text("0 = 不切") },
-                            singleLine = true,
-                            isError = (Formats.parseSeconds(tailText) ?: Double.NaN) < 0,
-                            modifier = Modifier.weight(1f),
-                        )
-                    } else {
+                if (settings.mode == TrimMode.HEAD_TAIL) {
+                    Text(
+                        "片头/片尾在每个视频的分析页单独设置，未设置的视频不裁剪",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = BlExt.textSecondary,
+                    )
+                } else {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
                             value = startText,
                             onValueChange = {
@@ -472,7 +430,8 @@ fun HomeScreen(
     // ---------- 开始前确认（批量覆盖模式才有；单文件直接走另存为） ----------
     if (showConfirm) {
         val modeLabel = if (settings.mode == TrimMode.HEAD_TAIL) {
-            "头尾裁剪：片头 ${settings.headSec}s + 片尾 ${settings.tailSec}s"
+            val customized = statuses.count { it.override?.headSec != null || it.override?.tailSec != null }
+            "头尾裁剪：片头/片尾按各视频单独设置（已自定义 $customized 个，其余不裁剪）"
         } else {
             "区间保留：${Formats.clock(settings.intervalStartSec)} – ${Formats.clock(settings.intervalEndSec)}"
         }

@@ -109,14 +109,14 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
     // 区间模式 -1（不切）原样显示
     fun initIntervalText(v: Double): String = if (v < 0) "-1" else Formats.clockMs(v)
 
-    var headText by remember { mutableStateOf(fmtSec(savedOverride?.headSec ?: settings.headSec)) }
-    var tailText by remember { mutableStateOf(fmtSec(savedOverride?.tailSec ?: settings.tailSec)) }
+    var headText by remember { mutableStateOf(fmtSec(savedOverride?.headSec ?: 0.0)) }
+    var tailText by remember { mutableStateOf(fmtSec(savedOverride?.tailSec ?: 0.0)) }
     var startText by remember { mutableStateOf(initIntervalText(savedOverride?.intervalStartSec ?: settings.intervalStartSec)) }
     var endText by remember { mutableStateOf(initIntervalText(savedOverride?.intervalEndSec ?: settings.intervalEndSec)) }
     var dropped by remember { mutableStateOf(savedOverride?.droppedStreams ?: emptySet<Int>()) }
 
-    val head = (Formats.parseSeconds(headText) ?: settings.headSec).coerceAtLeast(0.0)
-    val tail = (Formats.parseSeconds(tailText) ?: settings.tailSec).coerceAtLeast(0.0)
+    val head = (Formats.parseSeconds(headText) ?: 0.0).coerceAtLeast(0.0)
+    val tail = (Formats.parseSeconds(tailText) ?: 0.0).coerceAtLeast(0.0)
     val start = (Formats.parseTime(startText) ?: settings.intervalStartSec).coerceAtLeast(0.0)
     val endRaw = Formats.parseTime(endText) ?: settings.intervalEndSec
     val end = if (endRaw < 0) dur else endRaw
@@ -350,8 +350,9 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                 Button(
                     onClick = {
                         val o = PerFileOverride(
-                            headSec = if (head == settings.headSec) null else head,
-                            tailSec = if (tail == settings.tailSec) null else tail,
+                            // 片头/片尾已无全局默认，保存时直接记录本片的值
+                            headSec = head,
+                            tailSec = tail,
                             intervalStartSec = if (start == (settings.intervalStartSec.coerceAtLeast(0.0))) null else start,
                             intervalEndSec = if (endRaw == settings.intervalEndSec) null else endRaw,
                             droppedStreams = dropped,
@@ -366,20 +367,23 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                     BlTextButton(onClick = {
                         vm.setOverride(entry.docUri, null)
                         onClose()
-                    }) { Text("恢复全局设置") }
+                    }) { Text("清除本片设置") }
                 }
             }
-            // 目录模式下：把本片的剪辑参数应用到全部视频（更新全局默认）
+            // 目录模式下：把本片的剪辑参数应用到全部视频
+            // 头尾模式 → 写入每个视频的单独设置；区间模式 → 更新全局区间参数
             if (!entry.isSingleFile) {
                 BlOutlinedButton(
                     onClick = {
-                        vm.updateSettings { s ->
-                            s.copy(
-                                headSec = if (settings.mode == TrimMode.HEAD_TAIL) head else s.headSec,
-                                tailSec = if (settings.mode == TrimMode.HEAD_TAIL) tail else s.tailSec,
-                                intervalStartSec = if (settings.mode == TrimMode.INTERVAL) start else s.intervalStartSec,
-                                intervalEndSec = if (settings.mode == TrimMode.INTERVAL) endRaw else s.intervalEndSec,
-                            )
+                        if (settings.mode == TrimMode.HEAD_TAIL) {
+                            vm.applyHeadTailToAll(head, tail)
+                        } else {
+                            vm.updateSettings { s ->
+                                s.copy(
+                                    intervalStartSec = start,
+                                    intervalEndSec = endRaw,
+                                )
+                            }
                         }
                         onClose()
                     },

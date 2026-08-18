@@ -21,8 +21,7 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 
 data class AppSettings(
     val mode: TrimMode = TrimMode.HEAD_TAIL,
-    val headSec: Double = 0.0,          // 默认 0 = 不切
-    val tailSec: Double = 0.0,          // 默认 0 = 不切
+    // 头尾裁剪的片头/片尾由每个视频单独设置（分析页 PerFileOverride），默认 0 = 不切
     val intervalStartSec: Double = -1.0, // -1 = 不切（起点归一化为 0）
     val intervalEndSec: Double = -1.0,   // -1 = 不切（终点归一化为片长）
     val alignment: AlignStrategy = AlignStrategy.CUT_LESS,
@@ -39,8 +38,6 @@ class SettingsRepository(private val context: Context) {
     private object Keys {
         val LAST_TREE = stringPreferencesKey("last_tree_uri")
         val MODE = intPreferencesKey("mode")
-        val HEAD = doublePreferencesKey("head_sec")
-        val TAIL = doublePreferencesKey("tail_sec")
         val INTERVAL_START = doublePreferencesKey("interval_start")
         val INTERVAL_END = doublePreferencesKey("interval_end")
         val ALIGNMENT = intPreferencesKey("alignment")
@@ -53,8 +50,6 @@ class SettingsRepository(private val context: Context) {
     val settings: Flow<AppSettings> = context.dataStore.data.map { p ->
         AppSettings(
             mode = p[Keys.MODE]?.let { TrimMode.entries.getOrNull(it) } ?: TrimMode.HEAD_TAIL,
-            headSec = p[Keys.HEAD] ?: 0.0,
-            tailSec = p[Keys.TAIL] ?: 0.0,
             intervalStartSec = p[Keys.INTERVAL_START] ?: -1.0,
             intervalEndSec = p[Keys.INTERVAL_END] ?: -1.0,
             alignment = p[Keys.ALIGNMENT]?.let { AlignStrategy.entries.getOrNull(it) } ?: AlignStrategy.CUT_LESS,
@@ -77,8 +72,6 @@ class SettingsRepository(private val context: Context) {
         context.dataStore.edit { p ->
             val cur = AppSettings(
                 mode = p[Keys.MODE]?.let { TrimMode.entries.getOrNull(it) } ?: TrimMode.HEAD_TAIL,
-                headSec = p[Keys.HEAD] ?: 0.0,
-                tailSec = p[Keys.TAIL] ?: 0.0,
                 intervalStartSec = p[Keys.INTERVAL_START] ?: -1.0,
                 intervalEndSec = p[Keys.INTERVAL_END] ?: -1.0,
                 alignment = p[Keys.ALIGNMENT]?.let { AlignStrategy.entries.getOrNull(it) } ?: AlignStrategy.CUT_LESS,
@@ -89,8 +82,6 @@ class SettingsRepository(private val context: Context) {
             )
             val next = transform(cur)
             p[Keys.MODE] = next.mode.ordinal
-            p[Keys.HEAD] = next.headSec
-            p[Keys.TAIL] = next.tailSec
             p[Keys.INTERVAL_START] = next.intervalStartSec
             p[Keys.INTERVAL_END] = next.intervalEndSec
             p[Keys.ALIGNMENT] = next.alignment.ordinal

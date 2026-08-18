@@ -85,10 +85,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             f.map { EntryStatus(it, TrimPlanner.logicalPlan(it, s, o[it.docUri]), o[it.docUri]) }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    /** 当前模式参数整体是否合法（区间模式 -1 = 不切，视为合法） */
+    /** 当前模式参数整体是否合法（头尾裁剪无全局参数，恒合法；区间模式 -1 = 不切，视为合法） */
     val paramsValid: StateFlow<Boolean> = settings.map { s ->
         when (s.mode) {
-            TrimMode.HEAD_TAIL -> s.headSec >= 0 && s.tailSec >= 0
+            TrimMode.HEAD_TAIL -> true
             TrimMode.INTERVAL -> s.intervalStartSec < 0 || s.intervalEndSec < 0 ||
                     s.intervalStartSec < s.intervalEndSec
         }
@@ -199,6 +199,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun setOverride(uri: Uri, o: PerFileOverride?) {
         _overrides.update { m ->
             if (o == null || o.isEmpty) m - uri else m + (uri to o)
+        }
+    }
+
+    /** 头尾裁剪模式：把 head/tail 写入所有视频的单独设置（合并保留已有轨道勾选等字段） */
+    fun applyHeadTailToAll(head: Double, tail: Double) {
+        _overrides.update { m ->
+            val result = m.toMutableMap()
+            _files.value.forEach { f ->
+                result[f.docUri] = (m[f.docUri] ?: PerFileOverride()).copy(headSec = head, tailSec = tail)
+            }
+            result
         }
     }
 
