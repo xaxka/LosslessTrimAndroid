@@ -194,7 +194,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
             // ---------- 时间轴 ----------
             SectionCard(
                 title = "时间轴与切点",
-                subtitle = "点击时间轴定位播放；拖动圆点调整切点。橙线 = 关键帧（无损剪辑物理边界）；红线 = 对齐后实际切点",
+                subtitle = "点击时间轴定位播放；拖动圆点调整切点（自动吸附关键帧）；红线 = 对齐后实际切点",
             ) {
                 if (keyframes == null) {
                     LinearProgressIndicator(
@@ -211,7 +211,6 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                 TimelineBar(
                     uri = entry.docUri,
                     dur = dur,
-                    keyframes = kfs,
                     reqStart = plan.requestedStart,
                     reqEnd = plan.requestedEnd,
                     actStart = plan.actualStart,
@@ -392,12 +391,11 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
     }
 }
 
-/** 时间轴：缩略图层 → Segment 高亮 → Keyframe → Start/End 手柄 → Playhead（最上层） */
+/** 时间轴：缩略图层 → Segment 高亮 → Start/End 手柄 → 实际切点 → Playhead（最上层） */
 @Composable
 fun TimelineBar(
     uri: android.net.Uri,
     dur: Double,
-    keyframes: List<Double>,
     reqStart: Double,
     reqEnd: Double,
     actStart: Double,
@@ -492,28 +490,15 @@ fun TimelineBar(
                         size = Size(rx1 - rx0, 32f),
                     )
                 }
-                // 3. 关键帧标记
-                val step = if (keyframes.size > 1500) keyframes.size / 1500 + 1 else 1
-                var i = 0
-                while (i < keyframes.size) {
-                    val kx = x(keyframes[i])
-                    drawLine(
-                        color = BlExt.warning.copy(alpha = 0.75f),
-                        start = Offset(kx, h / 2 - 22f),
-                        end = Offset(kx, h / 2 + 22f),
-                        strokeWidth = 1.5f,
-                    )
-                    i += step
-                }
-                // 4. 实际切点（对齐后，红）
+                // 3. 实际切点（对齐后，红）
                 drawLine(BlExt.error, Offset(x(actStart), 2f), Offset(x(actStart), h - 2f), 2f)
                 drawLine(BlExt.error, Offset(x(actEnd), 2f), Offset(x(actEnd), h - 2f), 2f)
-                // 5. Start / End 手柄
+                // 4. Start / End 手柄
                 drawCircle(BlSecondary, radius = 11f, center = Offset(x(reqStart), h / 2))
                 drawCircle(BlSecondary, radius = 11f, center = Offset(x(reqEnd), h / 2))
                 drawCircle(Color.White, radius = 4f, center = Offset(x(reqStart), h / 2))
                 drawCircle(Color.White, radius = 4f, center = Offset(x(reqEnd), h / 2))
-                // 6. Playhead（最上层，深色竖线 + 三角头）
+                // 5. Playhead（最上层，深色竖线 + 三角头）
                 val phx = x(playheadSec)
                 drawLine(
                     color = Color(0xFF1A1C1E),
@@ -585,33 +570,24 @@ fun ThumbnailStrip(uri: android.net.Uri, dur: Double) {
             .clip(MaterialTheme.shapes.extraSmall)
             .background(BlSurfaceVariant),
     ) {
-        if (thumbs.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(
-                    "缩略图生成中…",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = BlExt.textDisabled,
-                )
-            }
-        } else {
-            thumbs.forEach { b ->
-                Box(
-                    Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .padding(0.5.dp)
-                        .clip(MaterialTheme.shapes.extraSmall)
-                        .background(BlSurfaceVariant),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    if (b != null) {
-                        Image(
-                            bitmap = b.asImageBitmap(),
-                            contentDescription = null,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    }
+        // 生成期间仅显示空白灰条，不做占位提示
+        thumbs.forEach { b ->
+            Box(
+                Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .padding(0.5.dp)
+                    .clip(MaterialTheme.shapes.extraSmall)
+                    .background(BlSurfaceVariant),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (b != null) {
+                    Image(
+                        bitmap = b.asImageBitmap(),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
                 }
             }
         }
