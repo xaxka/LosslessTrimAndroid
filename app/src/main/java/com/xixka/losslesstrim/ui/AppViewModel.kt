@@ -192,28 +192,38 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 把变换写入所有视频的单独设置（合并保留已有字段）；结果为空则移除该文件的覆盖 */
-    private fun applyOverrideToAll(transform: (PerFileOverride) -> PerFileOverride) {
+    /** 把变换写入所有视频的单独设置（合并保留已有字段，需文件信息换算时用 entry）；结果为空则移除该文件的覆盖 */
+    private fun applyOverrideToAll(transform: (VideoEntry, PerFileOverride) -> PerFileOverride) {
         _overrides.update { m ->
             val result = m.toMutableMap()
             _files.value.forEach { f ->
-                val o = transform(m[f.docUri] ?: PerFileOverride())
+                val o = transform(f, m[f.docUri] ?: PerFileOverride())
                 if (o.isEmpty) result.remove(f.docUri) else result[f.docUri] = o
             }
             result
         }
     }
 
-    /** 头尾裁剪模式：统一全部视频的片头/片尾（0 = 不裁剪） */
-    fun applyHeadTailToAll(head: Double, tail: Double) = applyOverrideToAll {
-        it.copy(headSec = head.takeIf { v -> v > 0.0 }, tailSec = tail.takeIf { v -> v > 0.0 })
+    /** 头尾裁剪模式：统一全部视频的片头/片尾（0 = 不裁剪），同步换算区间字段（参数互通） */
+    fun applyHeadTailToAll(head: Double, tail: Double) = applyOverrideToAll { f, it ->
+        val dur = f.probe.durationSec
+        it.copy(
+            headSec = head.takeIf { v -> v > 0.0 },
+            tailSec = tail.takeIf { v -> v > 0.0 },
+            intervalStartSec = head.takeIf { v -> v > 0.0 },
+            intervalEndSec = (dur - tail).takeIf { tail > 0.0 && it > 0.0 },
+        )
     }
 
-    /** 区间模式：统一全部视频的开始/结束（-1 = 保留全片） */
-    fun applyIntervalToAll(start: Double, end: Double) = applyOverrideToAll {
+    /** 区间模式：统一全部视频的开始/结束（-1 = 保留全片），同步换算头尾字段（参数互通） */
+    fun applyIntervalToAll(start: Double, end: Double) = applyOverrideToAll { f, it ->
+        val dur = f.probe.durationSec
+        val endSec = if (end < 0) dur else end
         it.copy(
             intervalStartSec = start.takeIf { v -> v >= 0.0 },
             intervalEndSec = end.takeIf { v -> v >= 0.0 },
+            headSec = start.takeIf { v -> v > 0.0 },
+            tailSec = (dur - endSec).takeIf { endSec < dur && it > 0.0 },
         )
     }
 

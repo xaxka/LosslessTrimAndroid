@@ -342,14 +342,26 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(
                     onClick = {
-                        // 已无全局默认：0/未设置即存 null，全空时不产生覆盖记录
-                        val o = PerFileOverride(
-                            headSec = head.takeIf { it > 0.0 },
-                            tailSec = tail.takeIf { it > 0.0 },
-                            intervalStartSec = startRaw.takeIf { it >= 0.0 },
-                            intervalEndSec = endRaw.takeIf { it >= 0.0 },
-                            droppedStreams = dropped,
-                        )
+                        // 两模式参数互通：以当前模式输入为准，换算出另一模式字段一起写入
+                        // （头尾 head↔开始、片尾 tail↔结束时间按 dur 换算），切换模式数值跟随
+                        val o = if (settings.mode == TrimMode.HEAD_TAIL) {
+                            PerFileOverride(
+                                headSec = head.takeIf { it > 0.0 },
+                                tailSec = tail.takeIf { it > 0.0 },
+                                intervalStartSec = head.takeIf { it > 0.0 },
+                                intervalEndSec = (dur - tail).takeIf { tail > 0.0 && it > 0.0 },
+                                droppedStreams = dropped,
+                            )
+                        } else {
+                            val endSec = if (endRaw < 0) dur else endRaw
+                            PerFileOverride(
+                                intervalStartSec = startRaw.takeIf { it >= 0.0 },
+                                intervalEndSec = endRaw.takeIf { it >= 0.0 },
+                                headSec = start.takeIf { it > 0.0 },
+                                tailSec = (dur - endSec).takeIf { endSec < dur && it > 0.0 },
+                                droppedStreams = dropped,
+                            )
+                        }
                         vm.setOverride(entry.docUri, o)
                         onClose()
                     },
