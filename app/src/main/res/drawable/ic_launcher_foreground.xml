@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 时间轴条 -->
+    <path
+        android:fillColor="#475569"
+        android:pathData="M24,40 L84,40 A4,4 0 0 1 88,44 L88,64 A4,4 0 0 1 84,68 L24,68 A4,4 0 0 1 20,64 L20,44 A4,4 0 0 1 24,40 Z" />
+    <!-- 裁剪保留区（高亮） -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M42,42 L62,42 L62,66 L42,66 Z" />
+    <!-- 播放三角 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M49,49 L57,54 L49,59 Z" />
+    <!-- 左右切点竖线 -->
+    <path
+        android:strokeColor="#F87171"
+        android:strokeWidth="3"
+        android:pathData="M42,36 L42,72" />
+    <path
+        android:strokeColor="#F87171"
+        android:strokeWidth="3"
+        android:pathData="M62,36 L62,72" />
+</vector>

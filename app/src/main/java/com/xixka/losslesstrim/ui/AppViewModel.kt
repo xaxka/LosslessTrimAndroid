@@ -1,0 +1,206 @@
+package com.xixka.losslesstrim.ui
+
+import android.app.Application
+import android.content.Intent
+import android.net.Uri
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.xixka.losslesstrim.data.AppSettings
+import com.xixka.losslesstrim.data.FileResult
+import com.xixka.losslesstrim.data.Outcome
+import com.xixka.losslesstrim.data.PerFileOverride
+import com.xixka.losslesstrim.data.Scanner
+import com.xixka.losslesstrim.data.SettingsRepository
+import com.xixka.losslesstrim.data.TrimMode
+import com.xixka.losslesstrim.data.VideoEntry
+import com.xixka.losslesstrim.trim.DocUtils
+import com.xixka.losslesstrim.trim.TrimController
+import com.xixka.losslesstrim.trim.TrimJob
+import com.xixka.losslesstrim.trim.TrimPlanner
+import com.xixka.losslesstrim.data.TrimPlan
+import com.xixka.losslesstrim.util.Formats
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+
+/** 列表条目 + 当前参数下的处理计划 */
+data class EntryStatus(
+    val entry: VideoEntry,
+    val plan: TrimPlan,
+    val override: PerFileOverride?,
+)
+
+class AppViewModel(app: Application) : AndroidViewModel(app) {
+
+    private val repo = SettingsRepository(app)
+
+    val settings: StateFlow<AppSettings> =
+        repo.settings.stateIn(viewModelScope, SharingStarted.Eagerly, AppSettings())
+
+    private val _files = MutableStateFlow<List<VideoEntry>>(emptyList())
+    val files = _files.asStateFlow()
+
+    private val _scanning = MutableStateFlow(false)
+    val scanning = _scanning.asStateFlow()
+
+    private val _scanMsg = MutableStateFlow<String?>(null)
+    val scanMsg = _scanMsg.asStateFlow()
+
+    private val _treeUri = MutableStateFlow<Uri?>(null)
+    val treeUri = _treeUri.asStateFlow()
+
+    private val _overrides = MutableStateFlow<Map<Uri, PerFileOverride>>(emptyMap())
+    val overrides = _overrides.asStateFlow()
+
+    private var scanJob: Job? = null
+
+    init {
+        // 恢复上次目录（持久化权限仍有效时自动重扫）
+        viewModelScope.launch {
+            val treeStr = repo.lastTreeUri.first()
+            if (treeStr.isNotEmpty()) {
+                val uri = Uri.parse(treeStr)
+                val persisted = getApplication<Application>().contentResolver
+                    .persistedUriPermissions.any {
+                        it.uri == uri && it.isReadPermission && it.isWritePermission
+                    }
+                if (persisted) {
+                    _treeUri.value = uri
+                    rescan()
+                }
+            }
+        }
+        // 子目录开关变化时自动重扫
+        viewModelScope.launch {
+            settings.map { it.includeSubdirs }.distinctUntilChanged().drop(1).collect {
+                if (_treeUri.value != null) rescan()
+            }
+        }
+    }
+
+    val statuses: StateFlow<List<EntryStatus>> =
+        combine(files, settings, overrides) { f, s, o ->
+            f.map { EntryStatus(it, TrimPlanner.logicalPlan(it, s, o[it.docUri]), o[it.docUri]) }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /** 当前模式参数整体是否合法 */
+    val paramsValid: StateFlow<Boolean> = settings.map { s ->
+        when (s.mode) {
+            TrimMode.HEAD_TAIL -> s.headSec >= 0 && s.tailSec >= 0
+            TrimMode.INTERVAL -> s.intervalStartSec < s.intervalEndSec
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
+    val processableCount: StateFlow<Int> =
+        statuses.map { st -> st.count { it.plan.ok } }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    /** 剩余空间预警（尽力而为，仅主存储目录可估算） */
+    val spaceWarning: StateFlow<String?> =
+        combine(files, settings, treeUri) { f, s, tree ->
+            Triple(f, s, tree)
+        }.map { (f, s, tree) ->
+            val treeUri = tree ?: return@map null
+            val okFiles = f.filter { TrimPlanner.logicalPlan(it, s, null).ok }
+            val maxFile = okFiles.maxOfOrNull { it.sizeBytes } ?: return@map null
+            val free = DocUtils.freeBytesOfTree(treeUri) ?: return@map null
+            val need = (maxFile * 1.1).toLong()
+            if (free < need) {
+                "剩余空间可能不足：约需 ${Formats.size(need)}，当前可用 ${Formats.size(free)}"
+            } else null
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    fun updateSettings(transform: (AppSettings) -> AppSettings) {
+        viewModelScope.launch { repo.update(transform) }
+    }
+
+    fun onFolderPicked(uri: Uri) {
+        val app = getApplication<Application>()
+        try {
+            app.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        } catch (_: SecurityException) {
+        } catch (_: IllegalArgumentException) {
+        }
+        _treeUri.value = uri
+        viewModelScope.launch { repo.setLastTreeUri(uri.toString()) }
+        rescan()
+    }
+
+    fun rescan() {
+        val tree = _treeUri.value ?: return
+        scanJob?.cancel()
+        _scanning.value = true
+        _scanMsg.value = null
+        scanJob = viewModelScope.launch {
+            try {
+                val list = Scanner.scanFolder(getApplication(), tree, settings.value.includeSubdirs)
+                _files.value = list
+                _scanMsg.value = when {
+                    list.isEmpty() -> "该文件夹里没有找到视频文件"
+                    else -> {
+                        val bad = list.count { !it.probe.probeOk }
+                        if (bad > 0) "共 ${list.size} 个视频，其中 $bad 个不可处理"
+                        else "共 ${list.size} 个视频"
+                    }
+                }
+            } catch (e: Exception) {
+                _files.value = emptyList()
+                _scanMsg.value = "扫描失败：${e.message}"
+            } finally {
+                _scanning.value = false
+            }
+        }
+    }
+
+    fun setOverride(uri: Uri, o: PerFileOverride?) {
+        _overrides.update { m ->
+            if (o == null || o.isEmpty) m - uri else m + (uri to o)
+        }
+    }
+
+    fun confirmOverwrite() {
+        updateSettings { it.copy(overwriteConfirmed = true) }
+    }
+
+    fun startBatch() {
+        val s = settings.value
+        val st = statuses.value.filter { it.plan.ok }
+        if (st.isEmpty()) return
+        val jobs = st.map { TrimJob(it.entry, s, it.override?.takeIf { o -> !o.isEmpty }) }
+        TrimController.start(getApplication(), jobs)
+    }
+
+    fun retryFailed() {
+        val results = TrimController.lastResults.value
+        val retryable = results
+            .filter { it.outcome == Outcome.FAILED || it.outcome == Outcome.CANCELLED }
+            .map { it.entry.docUri }
+            .toSet()
+        if (retryable.isEmpty()) return
+        val s = settings.value
+        val st = statuses.value.filter { it.plan.ok && it.entry.docUri in retryable }
+        if (st.isEmpty()) return
+        val jobs = st.map { TrimJob(it.entry, s, it.override?.takeIf { o -> !o.isEmpty }) }
+        TrimController.start(getApplication(), jobs)
+    }
+
+    fun clearResults() {
+        TrimController.lastResults.value = emptyList()
+        TrimController.queueUi.value = com.xixka.losslesstrim.trim.QueueUi.Idle
+    }
+
+    fun lastResults(): List<FileResult> = TrimController.lastResults.value
+}
