@@ -11,7 +11,6 @@ import com.xixka.losslesstrim.data.Outcome
 import com.xixka.losslesstrim.data.PerFileOverride
 import com.xixka.losslesstrim.data.Scanner
 import com.xixka.losslesstrim.data.SettingsRepository
-import com.xixka.losslesstrim.data.TrimMode
 import com.xixka.losslesstrim.data.VideoEntry
 import com.xixka.losslesstrim.trim.DocUtils
 import com.xixka.losslesstrim.trim.TrimController
@@ -84,15 +83,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         combine(files, settings, overrides) { f, s, o ->
             f.map { EntryStatus(it, TrimPlanner.logicalPlan(it, s, o[it.docUri]), o[it.docUri]) }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    /** 当前模式参数整体是否合法（头尾裁剪无全局参数，恒合法；区间模式 -1 = 不切，视为合法） */
-    val paramsValid: StateFlow<Boolean> = settings.map { s ->
-        when (s.mode) {
-            TrimMode.HEAD_TAIL -> true
-            TrimMode.INTERVAL -> s.intervalStartSec < 0 || s.intervalEndSec < 0 ||
-                    s.intervalStartSec < s.intervalEndSec
-        }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
 
     /** 是否单文件模式（无目录权限，只能另存为） */
     val isSingleFile: Boolean
@@ -202,15 +192,29 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 头尾裁剪模式：把 head/tail 写入所有视频的单独设置（合并保留已有轨道勾选等字段） */
-    fun applyHeadTailToAll(head: Double, tail: Double) {
+    /** 把变换写入所有视频的单独设置（合并保留已有字段）；结果为空则移除该文件的覆盖 */
+    private fun applyOverrideToAll(transform: (PerFileOverride) -> PerFileOverride) {
         _overrides.update { m ->
             val result = m.toMutableMap()
             _files.value.forEach { f ->
-                result[f.docUri] = (m[f.docUri] ?: PerFileOverride()).copy(headSec = head, tailSec = tail)
+                val o = transform(m[f.docUri] ?: PerFileOverride())
+                if (o.isEmpty) result.remove(f.docUri) else result[f.docUri] = o
             }
             result
         }
+    }
+
+    /** 头尾裁剪模式：统一全部视频的片头/片尾（0 = 不裁剪） */
+    fun applyHeadTailToAll(head: Double, tail: Double) = applyOverrideToAll {
+        it.copy(headSec = head.takeIf { v -> v > 0.0 }, tailSec = tail.takeIf { v -> v > 0.0 })
+    }
+
+    /** 区间模式：统一全部视频的开始/结束（-1 = 保留全片） */
+    fun applyIntervalToAll(start: Double, end: Double) = applyOverrideToAll {
+        it.copy(
+            intervalStartSec = start.takeIf { v -> v >= 0.0 },
+            intervalEndSec = end.takeIf { v -> v >= 0.0 },
+        )
     }
 
     fun confirmOverwrite() {

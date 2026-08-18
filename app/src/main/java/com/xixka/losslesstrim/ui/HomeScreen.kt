@@ -34,7 +34,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -75,7 +74,6 @@ fun HomeScreen(
     val statuses by vm.statuses.collectAsState()
     val scanning by vm.scanning.collectAsState()
     val scanMsg by vm.scanMsg.collectAsState()
-    val paramsValid by vm.paramsValid.collectAsState()
     val processable by vm.processableCount.collectAsState()
     val spaceWarning by vm.spaceWarning.collectAsState()
     val treeUri by vm.treeUri.collectAsState()
@@ -86,24 +84,6 @@ fun HomeScreen(
     var afterPermAction by remember { mutableStateOf<(() -> Unit)?>(null) }
 
     val isSingle = vm.isSingleFile
-
-    fun intervalToStr(v: Double): String = if (v < 0) "-1" else Formats.clock(v)
-
-    var startText by remember { mutableStateOf(intervalToStr(settings.intervalStartSec)) }
-    var startSync by remember { mutableStateOf(settings.intervalStartSec) }
-    var endText by remember { mutableStateOf(intervalToStr(settings.intervalEndSec)) }
-    var endSync by remember { mutableStateOf(settings.intervalEndSec) }
-
-    LaunchedEffect(settings.intervalStartSec) {
-        if (startSync != settings.intervalStartSec) {
-            startText = intervalToStr(settings.intervalStartSec); startSync = settings.intervalStartSec
-        }
-    }
-    LaunchedEffect(settings.intervalEndSec) {
-        if (endSync != settings.intervalEndSec) {
-            endText = intervalToStr(settings.intervalEndSec); endSync = settings.intervalEndSec
-        }
-    }
 
     fun startInternal(outputUri: android.net.Uri? = null) {
         vm.startBatch(outputUri)
@@ -143,10 +123,6 @@ fun HomeScreen(
         hint = null
         if (TrimController.running) {
             onStartProcessing()
-            return
-        }
-        if (!paramsValid) {
-            hint = "参数不合法：开始时间需小于结束时间（-1 = 不切）"
             return
         }
         if (statuses.isEmpty()) {
@@ -236,58 +212,19 @@ fun HomeScreen(
                 )
             }
 
-            // ---------- 参数卡（仅当前模式的两个数值） ----------
+            // ---------- 参数卡（剪辑数值均每视频单独设置，无全局参数） ----------
             SectionCard(
                 title = null,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
             ) {
-                if (settings.mode == TrimMode.HEAD_TAIL) {
-                    Text(
-                        "片头/片尾在每个视频的分析页单独设置，未设置的视频不裁剪",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = BlExt.textSecondary,
-                    )
-                } else {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(
-                            value = startText,
-                            onValueChange = {
-                                startText = it
-                                Formats.parseTime(it)?.let { v ->
-                                    startSync = v
-                                    vm.updateSettings { s -> s.copy(intervalStartSec = v) }
-                                }
-                            },
-                            label = { Text("开始(分:秒)") },
-                            supportingText = { Text("-1 = 从头") },
-                            singleLine = true,
-                            isError = !paramsValid,
-                            modifier = Modifier.weight(1f),
-                        )
-                        OutlinedTextField(
-                            value = endText,
-                            onValueChange = {
-                                endText = it
-                                Formats.parseTime(it)?.let { v ->
-                                    endSync = v
-                                    vm.updateSettings { s -> s.copy(intervalEndSec = v) }
-                                }
-                            },
-                            label = { Text("结束(分:秒)") },
-                            supportingText = { Text("-1 = 到片尾") },
-                            singleLine = true,
-                            isError = !paramsValid,
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-                }
-                if (!paramsValid) {
-                    Text(
-                        "参数非法：开始时间需小于结束时间（-1 = 不切）",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
+                Text(
+                    if (settings.mode == TrimMode.HEAD_TAIL)
+                        "片头/片尾在每个视频的分析页单独设置，未设置的视频不裁剪"
+                    else
+                        "开始/结束时间在每个视频的分析页单独设置，未设置的视频保留全片",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = BlExt.textSecondary,
+                )
             }
 
             // ---------- 空状态 / 列表 ----------
@@ -433,7 +370,8 @@ fun HomeScreen(
             val customized = statuses.count { it.override?.headSec != null || it.override?.tailSec != null }
             "头尾裁剪：片头/片尾按各视频单独设置（已自定义 $customized 个，其余不裁剪）"
         } else {
-            "区间保留：${Formats.clock(settings.intervalStartSec)} – ${Formats.clock(settings.intervalEndSec)}"
+            val customized = statuses.count { it.override?.intervalStartSec != null || it.override?.intervalEndSec != null }
+            "区间保留：开始/结束按各视频单独设置（已自定义 $customized 个，其余保留全片）"
         }
         AlertDialog(
             onDismissRequest = { showConfirm = false },

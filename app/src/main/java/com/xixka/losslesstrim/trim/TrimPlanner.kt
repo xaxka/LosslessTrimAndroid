@@ -33,9 +33,9 @@ object TrimPlanner {
                 }
             }
             TrimMode.INTERVAL -> {
-                // 负值（-1）= 不切：起点归一化为 0，终点归一化为片长
-                val rawStart = o?.intervalStartSec ?: s.intervalStartSec
-                val rawEnd = o?.intervalEndSec ?: s.intervalEndSec
+                // 区间每视频单独设置（PerFileOverride），无设置时 -1 = 不切
+                val rawStart = o?.intervalStartSec ?: -1.0
+                val rawEnd = o?.intervalEndSec ?: -1.0
                 val start = if (rawStart < 0) 0.0 else rawStart
                 val end = if (rawEnd < 0) dur else rawEnd
                 if (start >= end) {

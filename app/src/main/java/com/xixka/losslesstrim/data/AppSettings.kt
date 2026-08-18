@@ -4,7 +4,6 @@ import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
-import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -21,9 +20,8 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 
 data class AppSettings(
     val mode: TrimMode = TrimMode.HEAD_TAIL,
-    // 头尾裁剪的片头/片尾由每个视频单独设置（分析页 PerFileOverride），默认 0 = 不切
-    val intervalStartSec: Double = -1.0, // -1 = 不切（起点归一化为 0）
-    val intervalEndSec: Double = -1.0,   // -1 = 不切（终点归一化为片长）
+    // 两种模式的剪辑数值均由每个视频单独设置（分析页 PerFileOverride）：
+    // 头尾：headSec/tailSec；区间：intervalStartSec/intervalEndSec（-1 = 不切）
     val alignment: AlignStrategy = AlignStrategy.CUT_LESS,
     val container: OutputContainer = OutputContainer.KEEP,
     val overwrite: Boolean = true,
@@ -38,8 +36,6 @@ class SettingsRepository(private val context: Context) {
     private object Keys {
         val LAST_TREE = stringPreferencesKey("last_tree_uri")
         val MODE = intPreferencesKey("mode")
-        val INTERVAL_START = doublePreferencesKey("interval_start")
-        val INTERVAL_END = doublePreferencesKey("interval_end")
         val ALIGNMENT = intPreferencesKey("alignment")
         val CONTAINER = intPreferencesKey("container")
         val OVERWRITE = booleanPreferencesKey("overwrite")
@@ -50,8 +46,6 @@ class SettingsRepository(private val context: Context) {
     val settings: Flow<AppSettings> = context.dataStore.data.map { p ->
         AppSettings(
             mode = p[Keys.MODE]?.let { TrimMode.entries.getOrNull(it) } ?: TrimMode.HEAD_TAIL,
-            intervalStartSec = p[Keys.INTERVAL_START] ?: -1.0,
-            intervalEndSec = p[Keys.INTERVAL_END] ?: -1.0,
             alignment = p[Keys.ALIGNMENT]?.let { AlignStrategy.entries.getOrNull(it) } ?: AlignStrategy.CUT_LESS,
             container = p[Keys.CONTAINER]?.let { OutputContainer.entries.getOrNull(it) } ?: OutputContainer.KEEP,
             overwrite = p[Keys.OVERWRITE] ?: true,
@@ -72,8 +66,6 @@ class SettingsRepository(private val context: Context) {
         context.dataStore.edit { p ->
             val cur = AppSettings(
                 mode = p[Keys.MODE]?.let { TrimMode.entries.getOrNull(it) } ?: TrimMode.HEAD_TAIL,
-                intervalStartSec = p[Keys.INTERVAL_START] ?: -1.0,
-                intervalEndSec = p[Keys.INTERVAL_END] ?: -1.0,
                 alignment = p[Keys.ALIGNMENT]?.let { AlignStrategy.entries.getOrNull(it) } ?: AlignStrategy.CUT_LESS,
                 container = p[Keys.CONTAINER]?.let { OutputContainer.entries.getOrNull(it) } ?: OutputContainer.KEEP,
                 overwrite = p[Keys.OVERWRITE] ?: true,
@@ -82,8 +74,6 @@ class SettingsRepository(private val context: Context) {
             )
             val next = transform(cur)
             p[Keys.MODE] = next.mode.ordinal
-            p[Keys.INTERVAL_START] = next.intervalStartSec
-            p[Keys.INTERVAL_END] = next.intervalEndSec
             p[Keys.ALIGNMENT] = next.alignment.ordinal
             p[Keys.CONTAINER] = next.container.ordinal
             p[Keys.OVERWRITE] = next.overwrite
