@@ -212,21 +212,6 @@ fun HomeScreen(
                 )
             }
 
-            // ---------- 参数卡（剪辑数值均每视频单独设置，无全局参数） ----------
-            SectionCard(
-                title = null,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-            ) {
-                Text(
-                    if (settings.mode == TrimMode.HEAD_TAIL)
-                        "片头/片尾在每个视频的分析页单独设置，未设置的视频不裁剪"
-                    else
-                        "开始/结束时间在每个视频的分析页单独设置，未设置的视频保留全片",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = BlExt.textSecondary,
-                )
-            }
-
             // ---------- 空状态 / 列表 ----------
             if (statuses.isEmpty() && !scanning) {
                 Column(
