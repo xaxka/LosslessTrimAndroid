@@ -90,8 +90,9 @@ object DocUtils {
 
     /** 流拷贝兜底（rename 失败时用）；任一流打开失败则清理目标并返回 null，绝不留下空文件冒充成功 */
     fun copyTo(context: Context, srcUri: Uri, folderUri: Uri, mime: String, displayName: String): Uri? {
+        var dst: Uri? = null
         return try {
-            val dst = create(context, folderUri, mime, displayName) ?: return null
+            dst = create(context, folderUri, mime, displayName) ?: return null
             val input = context.contentResolver.openInputStream(srcUri)
             if (input == null) {
                 delete(context, dst)
@@ -109,6 +110,8 @@ object DocUtils {
             }
             dst
         } catch (e: Exception) {
+            // 中途异常：清理已创建的目标，绝不留下半成品文件
+            dst?.let { delete(context, it) }
             null
         }
     }

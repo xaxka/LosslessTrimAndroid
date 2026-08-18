@@ -49,11 +49,14 @@ object Probe {
             )
             val output = session.allLogsAsString
             val rc = session.returnCode
-            val result = if (rc != null && rc.isValueSuccess && !output.isNullOrBlank()) {
-                parseKeyframeJson(output)
-            } else emptyList()
-            keyframeCache[uri.toString()] = result
-            result
+            if (rc != null && rc.isValueSuccess && !output.isNullOrBlank()) {
+                // 仅成功结果写入缓存；失败不缓存，避免同一文件整个进程周期内都无法重试对齐
+                val parsed = parseKeyframeJson(output)
+                keyframeCache[uri.toString()] = parsed
+                parsed
+            } else {
+                emptyList()
+            }
         } catch (e: Exception) {
             emptyList()
         }

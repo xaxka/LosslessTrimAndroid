@@ -53,7 +53,15 @@ class TrimService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_CANCEL -> TrimController.cancel()
+            ACTION_CANCEL -> {
+                TrimController.cancel()
+                // 立即中断正在运行的 ffmpeg 会话（否则当前文件会完整跑完才停）
+                try {
+                    FFmpegKit.cancel()
+                } catch (_: Exception) {
+                }
+                if (!TrimController.running) stopSelf()
+            }
             ACTION_START -> {
                 startAsForeground()
                 if (!TrimController.running) {
@@ -155,11 +163,13 @@ class TrimService : Service() {
                 val job = jobs[idx]
                 val res = processJob(job, idx, jobs.size)
                 results += res
+                // 先自增再判取消：当前文件的结果已入列，补录从未处理的下一个开始，
+                // 否则同一文件会被补录第二条 CANCELLED，导致结果页 key 冲突崩溃
+                idx++
                 if (res.outcome == Outcome.CANCELLED) {
                     stopped = true
                     break
                 }
-                idx++
             }
             if (stopped) {
                 for (j in idx until jobs.size) {
@@ -209,6 +219,19 @@ class TrimService : Service() {
             return FileResult(entry, plan, Outcome.FAILED, entry.sizeBytes, reason = "未保留任何轨道")
         }
 
+        // 无实际改动（全片保留、未丢轨道、容器不变且为覆盖模式）：跳过重写，
+        // 避免"未设置裁剪"的文件被无意义地删除重建（覆盖模式下原文件会被替换）
+        if (job.outputUri == null && s.overwrite &&
+            plan.actualStart <= 0.001 &&
+            plan.actualEnd >= entry.probe.durationSec - 0.001 &&
+            target.ext == entry.ext && dropped.isEmpty()
+        ) {
+            return FileResult(
+                entry, plan, Outcome.SKIPPED, entry.sizeBytes,
+                reason = "全片保留、未丢轨道且容器不变，无需处理"
+            )
+        }
+
         val inParam = FFmpegKitConfig.getSafParameterForRead(this, entry.docUri)
         val durSec = plan.duration
 
@@ -221,14 +244,17 @@ class TrimService : Service() {
                 publishRunning(idx, total, entry.name, p, String.format(Locale.US, "%.1fx", speed))
             }
             val rc = session?.returnCode
-            if (rc == null || !rc.isValueSuccess || TrimController.cancelRequested) {
+            if (rc == null) {
                 DocUtils.delete(this, job.outputUri)
-                return FileResult(
-                    entry, plan,
-                    if (rc != null && rc.isValueCancel) Outcome.CANCELLED else Outcome.FAILED,
-                    entry.sizeBytes,
-                    reason = if (rc == null) "ffmpeg 会话异常结束" else extractError(session!!)
-                )
+                return FileResult(entry, plan, Outcome.FAILED, entry.sizeBytes, reason = "ffmpeg 会话异常结束")
+            }
+            if (rc.isValueCancel || TrimController.cancelRequested) {
+                DocUtils.delete(this, job.outputUri)
+                return FileResult(entry, plan, Outcome.CANCELLED, entry.sizeBytes, reason = "已取消（原文件未动）")
+            }
+            if (!rc.isValueSuccess) {
+                DocUtils.delete(this, job.outputUri)
+                return FileResult(entry, plan, Outcome.FAILED, entry.sizeBytes, reason = extractError(session))
             }
             val newSize = DocUtils.length(this, job.outputUri).coerceAtLeast(0)
             publishRunning(idx + 1, total, entry.name, 1f, "")
@@ -290,14 +316,30 @@ class TrimService : Service() {
         var newSize = DocUtils.length(this, partUri).coerceAtLeast(0)
         var finalUri: Uri? = null
         if (s.overwrite) {
+            // 安全顺序：先把原文件改名备份 → 落最终文件 → 成功后才删备份；失败可回滚，绝不先删原件
+            val backupName = "${entry.baseName}.trimbackup.${System.currentTimeMillis()}"
+            var backupUri: Uri? = null
             if (DocUtils.exists(this, entry.docUri)) {
-                DocUtils.delete(this, entry.docUri)
+                backupUri = DocUtils.rename(this, entry.docUri, backupName)
+                if (backupUri == null) {
+                    // 备份失败（目录不支持 rename）：.part 已成功生成，退回先删原件的旧兜底路径
+                    DocUtils.delete(this, entry.docUri)
+                }
             }
             finalUri = DocUtils.rename(this, partUri, finalName)
             if (finalUri == null) {
                 finalUri = DocUtils.copyTo(this, partUri, outFolder, target.mime, finalName)
                 if (finalUri != null) DocUtils.delete(this, partUri)
             }
+            if (finalUri == null) {
+                // 回滚：把备份改回原文件名，数据仍完整
+                backupUri?.let { DocUtils.rename(this, it, entry.name) }
+                return FileResult(
+                    entry, plan, Outcome.FAILED, entry.sizeBytes,
+                    reason = "输出替换失败（数据完整保留在 $partName，可手动改名）"
+                )
+            }
+            backupUri?.let { DocUtils.delete(this, it) }
         } else {
             DocUtils.findChild(this, outFolder, finalName)?.let { DocUtils.delete(this, it) }
             finalUri = DocUtils.rename(this, partUri, finalName)

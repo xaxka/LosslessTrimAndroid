@@ -86,8 +86,14 @@ fun HomeScreen(
     val isSingle = vm.isSingleFile
 
     fun startInternal(outputUri: android.net.Uri? = null) {
-        vm.startBatch(outputUri)
-        onStartProcessing()
+        if (vm.startBatch(outputUri)) {
+            onStartProcessing()
+        } else if (TrimController.running) {
+            // 已有队列在跑：跳转去看进度，而不是静默丢弃本次点击
+            onStartProcessing()
+        } else {
+            hint = "处理服务启动失败，请重试"
+        }
     }
 
     val notifPermLauncher = rememberLauncherForActivityResult(

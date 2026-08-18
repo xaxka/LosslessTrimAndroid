@@ -50,6 +50,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -73,6 +74,8 @@ import com.xixka.losslesstrim.ui.theme.BlSurfaceVariant
 import com.xixka.losslesstrim.util.Formats
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
 /**
@@ -245,11 +248,17 @@ fun ChoiceField(
 }
 
 /** 视频缩略图（surfaceVariant 占位） */
+
+/** 缩略图抽帧并发上限：列表逐行各开 MediaMetadataRetriever 会打爆 IO/内存 */
+private val thumbSemaphore = Semaphore(2)
+
 @Composable
 fun VideoThumb(uri: android.net.Uri, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val bmp by produceState<Bitmap?>(null, uri) {
-        value = withContext(Dispatchers.IO) { extractThumb(context, uri) }
+        value = thumbSemaphore.withPermit {
+            withContext(Dispatchers.IO) { extractThumb(context, uri) }
+        }
     }
     Box(
         modifier = modifier
@@ -346,6 +355,8 @@ fun VideoPlayerPanel(
     var durMs by remember { mutableStateOf(0L) }
 
     val player = remember(uri) { MediaPlayer() }
+    // 预览加载失败（MediaPlayer 不支持的容器等）：提示但不崩溃，剪辑处理不受影响
+    var loadError by remember(uri) { mutableStateOf(false) }
 
     DisposableEffect(uri) {
         player.setOnPreparedListener { mp ->
@@ -362,8 +373,18 @@ fun VideoPlayerPanel(
             posMs = 0L
             onPositionChange(0.0)
         }
-        player.setDataSource(context, uri)
-        player.prepareAsync()
+        player.setOnErrorListener { _, _, _ ->
+            loadError = true
+            prepared = false
+            true
+        }
+        try {
+            player.setDataSource(context, uri)
+            player.prepareAsync()
+        } catch (e: Exception) {
+            // ffprobe 能解析 ≠ MediaPlayer 能播（如部分 ts/mkv/wmv/ogv），失败只禁用预览
+            loadError = true
+        }
         onDispose {
             try {
                 player.stop()
@@ -429,25 +450,34 @@ fun VideoPlayerPanel(
                 .background(Color.Black),
             contentAlignment = Alignment.Center,
         ) {
-            AndroidView(
-                factory = { ctx ->
-                    TextureView(ctx).also { tv ->
-                        tv.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                            override fun onSurfaceTextureAvailable(st: android.graphics.SurfaceTexture, w: Int, h: Int) {
-                                try { player.setSurface(Surface(st)) } catch (_: Exception) {}
+            // key(uri)：uri 变化时重建 TextureView，让新的 MediaPlayer 重新绑定 surface
+            key(uri) {
+                AndroidView(
+                    factory = { ctx ->
+                        TextureView(ctx).also { tv ->
+                            tv.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                                override fun onSurfaceTextureAvailable(st: android.graphics.SurfaceTexture, w: Int, h: Int) {
+                                    try { player.setSurface(Surface(st)) } catch (_: Exception) {}
+                                }
+                                override fun onSurfaceTextureSizeChanged(st: android.graphics.SurfaceTexture, w: Int, h: Int) {}
+                                override fun onSurfaceTextureDestroyed(st: android.graphics.SurfaceTexture): Boolean {
+                                    try { player.setSurface(null) } catch (_: Exception) {}
+                                    return true
+                                }
+                                override fun onSurfaceTextureUpdated(st: android.graphics.SurfaceTexture) {}
                             }
-                            override fun onSurfaceTextureSizeChanged(st: android.graphics.SurfaceTexture, w: Int, h: Int) {}
-                            override fun onSurfaceTextureDestroyed(st: android.graphics.SurfaceTexture): Boolean {
-                                try { player.setSurface(null) } catch (_: Exception) {}
-                                return true
-                            }
-                            override fun onSurfaceTextureUpdated(st: android.graphics.SurfaceTexture) {}
                         }
-                    }
-                },
-                modifier = Modifier.fillMaxSize(),
-            )
-            if (!prepared) {
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            if (loadError) {
+                Text(
+                    "该格式无法预览（不影响剪辑处理）",
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            } else if (!prepared) {
                 Text("加载视频中…", color = Color.White, style = MaterialTheme.typography.labelMedium)
             } else {
                 // 当前播放位置（精确到毫秒）

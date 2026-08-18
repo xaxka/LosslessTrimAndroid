@@ -97,14 +97,17 @@ object TrimPlanner {
     }
 
     private fun nextOrLast(kfs: List<Double>, t: Double): Double {
-        // 第一个 ≥ t 的关键帧；没有则最后一个
+        // 第一个 ≥ t 的关键帧；t 已越过最后一个关键帧时保持原值：
+        // 结束点本身不要求落在关键帧上，回退到最后一个关键帧会静默剪掉片尾（最多一个 GOP）
         for (k in kfs) {
             if (k >= t) return k
         }
-        return kfs.last()
+        return t
     }
 
     private fun nearest(kfs: List<Double>, t: Double): Double {
+        // t 已越过最后一个关键帧时保持原值，避免"自动"策略静默剪掉片尾
+        if (t >= kfs.last()) return t
         var best = kfs[0]
         var bestDiff = Double.MAX_VALUE
         for (k in kfs) {

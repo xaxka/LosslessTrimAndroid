@@ -51,6 +51,7 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.xixka.losslesstrim.data.PerFileOverride
 import com.xixka.losslesstrim.data.TrimMode
@@ -415,6 +416,8 @@ fun TimelineBar(
     val curReqStart by rememberUpdatedState(reqStart)
     val curReqEnd by rememberUpdatedState(reqEnd)
     val curPlayhead by rememberUpdatedState(playheadSec)
+    // 命中阈值按 dp 换算成像素，不同屏幕密度下手感一致
+    val grabRadiusPx = with(LocalDensity.current) { 28.dp.toPx() }
 
     fun xOf(t: Double): Float =
         if (widthPx > 0 && dur > 0) (t / dur * widthPx).toFloat().coerceIn(0f, widthPx) else 0f
@@ -442,7 +445,7 @@ fun TimelineBar(
                                 val sx = xOf(curReqStart)
                                 val ex = xOf(curReqEnd)
                                 dragMode = when {
-                                    kotlin.math.abs(offset.x - px) <= 28f -> 2
+                                    kotlin.math.abs(offset.x - px) <= grabRadiusPx -> 2
                                     kotlin.math.abs(offset.x - sx) <= kotlin.math.abs(offset.x - ex) -> 0
                                     else -> 1
                                 }

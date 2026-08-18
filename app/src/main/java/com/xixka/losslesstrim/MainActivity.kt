@@ -83,8 +83,8 @@ fun App() {
                 screen = Screen.Home
             },
             onRetry = {
-                vm.retryFailed()
-                screen = Screen.Processing
+                // 没有真正可重试的任务时留在结果页，避免进入空的"队列未在运行"页
+                if (vm.retryFailed()) screen = Screen.Processing
             },
         )
 

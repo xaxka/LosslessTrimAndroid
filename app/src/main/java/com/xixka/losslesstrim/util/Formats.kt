@@ -60,7 +60,9 @@ object Formats {
 
     fun mb(bytes: Long): String = String.format(Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)
 
-    /** "05:30" / "-1" / "330" → 秒；非法返回 null。"-1" 为不切哨兵（仅裸 "-1"），其余负值/空段非法 */
+    /** "05:30" / "-1" / "330" → 秒；非法返回 null。"-1" 为不切哨兵（仅裸 "-1"），其余负值/空段非法。
+     *  多段输入时：分/秒必须为非负整数且 < 60（"5:70"、"1.5:30" 这类按非法处理，不再静默进位）；
+     *  小时段不限上限；单段纯秒数允许小数 */
     fun parseTime(text: String): Double? {
         val t = text.trim()
         if (t.isEmpty()) return null
@@ -68,9 +70,22 @@ object Formats {
         val parts = t.split(":")
         if (parts.size > 3) return null
         var sec = 0.0
-        for (p in parts) {
-            val v = p.trim().toDoubleOrNull() ?: return null
+        parts.forEachIndexed { i, p ->
+            val seg = p.trim()
+            if (seg.isEmpty()) return null
+            val v = seg.toDoubleOrNull() ?: return null
             if (v < 0) return null
+            if (parts.size > 1) {
+                val isLast = i == parts.size - 1
+                if (isLast) {
+                    // 秒段：允许小数，但必须 < 60
+                    if (v >= 60) return null
+                } else {
+                    // 时/分段：必须为整数；分段还需 < 60（小时不限）
+                    if (seg.contains('.')) return null
+                    if (parts.size == 3 && i == 1 && v >= 60) return null
+                }
+            }
             sec = sec * 60 + v
         }
         return sec

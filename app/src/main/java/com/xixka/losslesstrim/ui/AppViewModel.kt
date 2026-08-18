@@ -92,16 +92,21 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         statuses.map { st -> st.count { it.plan.ok } }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
-    /** 剩余空间预警（尽力而为，仅主存储目录可估算） */
+    /** 剩余空间预警（尽力而为，仅主存储目录可估算）；按每文件实际覆盖参数判断 */
     val spaceWarning: StateFlow<String?> =
-        combine(files, settings, treeUri) { f, s, tree ->
-            Triple(f, s, tree)
-        }.map { (f, s, tree) ->
-            val treeUri = tree ?: return@map null
-            val okFiles = f.filter { TrimPlanner.logicalPlan(it, s, null).ok }
-            val maxFile = okFiles.maxOfOrNull { it.sizeBytes } ?: return@map null
-            val free = DocUtils.freeBytesOfTree(treeUri) ?: return@map null
-            val need = (maxFile * 1.1).toLong()
+        combine(files, settings, treeUri, overrides) { f, s, tree, ov ->
+            val treeUri = tree ?: return@combine null
+            val okFiles = f.filter { TrimPlanner.logicalPlan(it, s, ov[it.docUri]).ok }
+            if (okFiles.isEmpty()) return@combine null
+            // 覆盖模式逐个替换只需装下最大文件；CutVideos 模式要装下全部输出
+            val basis = if (s.overwrite) {
+                okFiles.maxOfOrNull { it.sizeBytes } ?: return@combine null
+            } else {
+                val sum = okFiles.sumOf { it.sizeBytes }
+                if (sum <= 0) return@combine null else sum
+            }
+            val free = DocUtils.freeBytesOfTree(treeUri) ?: return@combine null
+            val need = (basis * 1.1).toLong()
             if (free < need) {
                 "剩余空间可能不足：约需 ${Formats.size(need)}，当前可用 ${Formats.size(free)}"
             } else null
@@ -113,6 +118,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun onFolderPicked(uri: Uri) {
         val app = getApplication<Application>()
+        if (_treeUri.value != null && _treeUri.value != uri) releaseOldTreePermission()
         try {
             app.contentResolver.takePersistableUriPermission(
                 uri,
@@ -126,8 +132,21 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         rescan()
     }
 
+    /** 释放不再使用的旧目录持久化授权（系统槽位有限，避免逐次泄漏） */
+    private fun releaseOldTreePermission() {
+        val old = _treeUri.value ?: return
+        try {
+            getApplication<Application>().contentResolver.releasePersistableUriPermission(
+                old,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        } catch (_: Exception) {
+        }
+    }
+
     /** 单文件编辑：直接探测该文件并进入列表（覆盖模式不可用，处理时另存为） */
     fun onSingleFilePicked(uri: Uri) {
+        releaseOldTreePermission()
         _treeUri.value = null
         _scanning.value = true
         _scanMsg.value = null
@@ -231,10 +250,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         updateSettings { it.copy(overwriteConfirmed = true) }
     }
 
-    fun startBatch(outputUri: Uri? = null) {
+    /** 返回 false = 没有可处理文件、已有队列在运行或服务启动失败 */
+    fun startBatch(outputUri: Uri? = null): Boolean {
         val s = settings.value
         val st = statuses.value.filter { it.plan.ok }
-        if (st.isEmpty()) return
+        if (st.isEmpty()) return false
         val single = outputUri
         val jobs = st.map {
             TrimJob(
@@ -243,24 +263,25 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 outputUri = if (single != null && it.entry.isSingleFile) single else null,
             )
         }
-        TrimController.start(getApplication(), jobs)
+        return TrimController.start(getApplication(), jobs)
     }
 
-    fun retryFailed() {
+    /** 重试失败/取消项；返回 false = 没有可重试的任务或启动失败（调用方不要跳转处理页） */
+    fun retryFailed(): Boolean {
         val results = TrimController.lastResults.value
         val retryable = results
             .filter { it.outcome == Outcome.FAILED || it.outcome == Outcome.CANCELLED }
             .map { it.entry.docUri }
             .toSet()
-        if (retryable.isEmpty()) return
+        if (retryable.isEmpty()) return false
         val s = settings.value
         // 单文件模式无目录权限，重试需重新走另存为（本页无法提供目标），排除之
         val st = statuses.value.filter {
             it.plan.ok && it.entry.docUri in retryable && !it.entry.isSingleFile
         }
-        if (st.isEmpty()) return
+        if (st.isEmpty()) return false
         val jobs = st.map { TrimJob(it.entry, s, it.override?.takeIf { o -> !o.isEmpty }) }
-        TrimController.start(getApplication(), jobs)
+        return TrimController.start(getApplication(), jobs)
     }
 
     fun clearResults() {

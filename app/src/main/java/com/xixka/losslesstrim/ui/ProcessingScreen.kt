@@ -99,7 +99,14 @@ fun ProcessingScreen() {
                     )
                     Spacer(Modifier.height(12.dp))
                     BlOutlinedButton(
-                        onClick = { TrimController.cancel() },
+                        onClick = {
+                            TrimController.cancel()
+                            // 立即中断正在运行的 ffmpeg 会话，不必等当前文件跑完
+                            try {
+                                com.antonkarpenko.ffmpegkit.FFmpegKit.cancel()
+                            } catch (_: Exception) {
+                            }
+                        },
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text("取消（.part 将被删除，原文件不动）") }
                 }

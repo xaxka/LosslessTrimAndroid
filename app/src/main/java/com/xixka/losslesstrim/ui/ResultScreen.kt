@@ -11,7 +11,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Info
@@ -147,7 +147,8 @@ fun ResultScreen(
             LazyColumn(
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
             ) {
-                items(results, key = { it.entry.docUri.toString() + it.outcome.name }) { r ->
+                // key 含下标：即使出现同文件同状态的重复条目也不会撞 key 崩溃
+                itemsIndexed(results, key = { i, r -> "$i-${r.entry.docUri}-${r.outcome.name}" }) { _, r ->
                     ResultRow(r)
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                 }

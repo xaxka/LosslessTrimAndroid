@@ -41,14 +41,23 @@ object TrimController {
     @Volatile var cancelRequested: Boolean = false
     @Volatile var running: Boolean = false
 
-    private var pendingJobs: List<TrimJob> = emptyList()
+    @Volatile private var pendingJobs: List<TrimJob> = emptyList()
+    private val lock = Any()
 
-    fun start(context: Context, jobs: List<TrimJob>) {
-        if (running) return
-        pendingJobs = jobs
-        cancelRequested = false
+    /** 返回 false = 已有队列在运行或服务启动失败（调用方据此提示用户，而不是静默丢弃） */
+    fun start(context: Context, jobs: List<TrimJob>): Boolean {
+        synchronized(lock) {
+            if (running) return false
+            pendingJobs = jobs
+            cancelRequested = false
+        }
         val intent = Intent(context, TrimService::class.java).setAction(TrimService.ACTION_START)
-        ContextCompat.startForegroundService(context, intent)
+        return try {
+            ContextCompat.startForegroundService(context, intent)
+            true
+        } catch (e: Exception) {
+            false
+        }
     }
 
     fun cancel() {
