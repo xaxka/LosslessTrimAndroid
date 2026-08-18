@@ -35,6 +35,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -42,7 +43,6 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -64,32 +64,7 @@ import com.xixka.losslesstrim.trim.TrimController
 import com.xixka.losslesstrim.ui.theme.BlExt
 import com.xixka.losslesstrim.util.Formats
 
-/** 模式切换标签（分割线样式）：选中 = 中蓝加粗，未选中 = 灰 */
-@Composable
-private fun ModeTab(
-    text: String,
-    selected: Boolean,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit,
-) {
-    Box(
-        modifier
-            .clip(MaterialTheme.shapes.small)
-            .clickable(onClick = onClick)
-            .padding(vertical = 12.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text,
-            style = if (selected) MaterialTheme.typography.titleMedium
-            else MaterialTheme.typography.bodyMedium,
-            color = if (selected) MaterialTheme.colorScheme.secondary else BlExt.textSecondary,
-            fontWeight = if (selected) FontWeight.SemiBold else null,
-        )
-    }
-}
-
-/** 主页：模式切换（分割线）+ 参数卡 + 双入口（文件夹批量 / 单文件编辑）+ 文件列表 */
+/** 主页：模式切换（FilterChip）+ 参数卡 + 双入口（文件夹批量 / 单文件编辑）+ 文件列表 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
@@ -262,33 +237,24 @@ fun HomeScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // ---------- 模式切换（分割线样式，初版布局） ----------
+            // ---------- 模式切换（FilterChip，初版布局） ----------
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
-                    .heightIn(min = 48.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                ModeTab(
-                    text = "头尾裁剪",
+                FilterChip(
                     selected = settings.mode == TrimMode.HEAD_TAIL,
-                    modifier = Modifier.weight(1f),
-                ) { vm.updateSettings { it.copy(mode = TrimMode.HEAD_TAIL) } }
-                VerticalDivider(
-                    modifier = Modifier.height(20.dp),
-                    color = MaterialTheme.colorScheme.outlineVariant,
+                    onClick = { vm.updateSettings { it.copy(mode = TrimMode.HEAD_TAIL) } },
+                    label = { Text("头尾裁剪") },
                 )
-                ModeTab(
-                    text = "区间保留",
+                FilterChip(
                     selected = settings.mode == TrimMode.INTERVAL,
-                    modifier = Modifier.weight(1f),
-                ) { vm.updateSettings { it.copy(mode = TrimMode.INTERVAL) } }
+                    onClick = { vm.updateSettings { it.copy(mode = TrimMode.INTERVAL) } },
+                    label = { Text("区间保留") },
+                )
             }
-            HorizontalDivider(
-                modifier = Modifier.padding(horizontal = 16.dp),
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-            )
 
             // ---------- 参数卡（仅当前模式的两个数值） ----------
             SectionCard(

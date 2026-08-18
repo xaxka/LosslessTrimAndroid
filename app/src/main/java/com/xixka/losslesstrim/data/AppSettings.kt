@@ -14,7 +14,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 enum class TrimMode { HEAD_TAIL, INTERVAL }
-enum class AlignStrategy { CUT_MORE, CUT_LESS, AUTO }   // 宁多切 / 宁少切 / 自动
+enum class AlignStrategy { CUT_MORE, CUT_LESS, AUTO }   // 多切 / 少切 / 自动
 enum class OutputContainer { KEEP, MP4, MKV }
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
@@ -25,10 +25,10 @@ data class AppSettings(
     val tailSec: Double = 0.0,          // 默认 0 = 不切
     val intervalStartSec: Double = -1.0, // -1 = 不切（起点归一化为 0）
     val intervalEndSec: Double = -1.0,   // -1 = 不切（终点归一化为片长）
-    val alignment: AlignStrategy = AlignStrategy.CUT_MORE,
+    val alignment: AlignStrategy = AlignStrategy.CUT_LESS,
     val container: OutputContainer = OutputContainer.KEEP,
     val overwrite: Boolean = true,
-    val includeSubdirs: Boolean = true,
+    val includeSubdirs: Boolean = false,
     /** 区间模式结束时间超片长：true=按片尾截断，false=跳过该文件 */
     val truncateOverlong: Boolean = true,
     /** 首次覆盖确认已展示过 */
@@ -59,10 +59,10 @@ class SettingsRepository(private val context: Context) {
             tailSec = p[Keys.TAIL] ?: 0.0,
             intervalStartSec = p[Keys.INTERVAL_START] ?: -1.0,
             intervalEndSec = p[Keys.INTERVAL_END] ?: -1.0,
-            alignment = p[Keys.ALIGNMENT]?.let { AlignStrategy.entries.getOrNull(it) } ?: AlignStrategy.CUT_MORE,
+            alignment = p[Keys.ALIGNMENT]?.let { AlignStrategy.entries.getOrNull(it) } ?: AlignStrategy.CUT_LESS,
             container = p[Keys.CONTAINER]?.let { OutputContainer.entries.getOrNull(it) } ?: OutputContainer.KEEP,
             overwrite = p[Keys.OVERWRITE] ?: true,
-            includeSubdirs = p[Keys.SUBDIRS] ?: true,
+            includeSubdirs = p[Keys.SUBDIRS] ?: false,
             truncateOverlong = p[Keys.TRUNCATE] ?: true,
             overwriteConfirmed = p[Keys.CONFIRMED] ?: false,
         )
@@ -84,10 +84,10 @@ class SettingsRepository(private val context: Context) {
                 tailSec = p[Keys.TAIL] ?: 0.0,
                 intervalStartSec = p[Keys.INTERVAL_START] ?: -1.0,
                 intervalEndSec = p[Keys.INTERVAL_END] ?: -1.0,
-                alignment = p[Keys.ALIGNMENT]?.let { AlignStrategy.entries.getOrNull(it) } ?: AlignStrategy.CUT_MORE,
+                alignment = p[Keys.ALIGNMENT]?.let { AlignStrategy.entries.getOrNull(it) } ?: AlignStrategy.CUT_LESS,
                 container = p[Keys.CONTAINER]?.let { OutputContainer.entries.getOrNull(it) } ?: OutputContainer.KEEP,
                 overwrite = p[Keys.OVERWRITE] ?: true,
-                includeSubdirs = p[Keys.SUBDIRS] ?: true,
+                includeSubdirs = p[Keys.SUBDIRS] ?: false,
                 truncateOverlong = p[Keys.TRUNCATE] ?: true,
                 overwriteConfirmed = p[Keys.CONFIRMED] ?: false,
             )

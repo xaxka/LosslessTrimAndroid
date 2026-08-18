@@ -74,8 +74,8 @@ object TrimPlanner {
 
     /**
      * 关键帧对齐。
-     * 宁多切：起点对齐到后一个关键帧（多砍），终点对齐到前一个关键帧（多砍）
-     * 宁少切：反之；自动：各取最近。
+     * 多切：起点对齐到后一个关键帧（多砍），终点对齐到前一个关键帧（多砍）
+     * 少切：反之；自动：各取最近。
      */
     fun align(t: Double, kfs: List<Double>, isEnd: Boolean, strategy: AlignStrategy): Double {
         if (kfs.isEmpty()) return t

@@ -43,6 +43,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -71,6 +72,21 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
 import kotlin.math.abs
+
+/** 吸附到最近的关键帧（阈值 0.5s 内），便于在时间轴上精准对齐切点 */
+private fun snapToKeyframe(t: Double, kfs: List<Double>): Double {
+    if (kfs.isEmpty()) return t
+    var best = kfs[0]
+    var bestDiff = Double.MAX_VALUE
+    for (k in kfs) {
+        val d = abs(k - t)
+        if (d < bestDiff) {
+            bestDiff = d
+            best = k
+        }
+    }
+    return if (bestDiff < 0.5) best else t
+}
 
 /** 单文件分析视图：视频预览（五按钮）+ 时间轴 + 关键帧 + 切点抽帧 + 轨道勾选 */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -120,11 +136,13 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
 
     fun onDragPoint(isStart: Boolean, t: Double) {
         val clamped = t.coerceIn(0.0, dur)
+        // 拖动时吸附到最近的关键帧（0.5s 内），便于精准对齐
+        val snapped = snapToKeyframe(clamped, kfs)
         when {
-            settings.mode == TrimMode.HEAD_TAIL && isStart -> headText = fmtSec(clamped)
-            settings.mode == TrimMode.HEAD_TAIL -> tailText = fmtSec((dur - clamped).coerceIn(0.0, dur))
-            isStart -> startText = Formats.clock(clamped)
-            else -> endText = Formats.clock(clamped)
+            settings.mode == TrimMode.HEAD_TAIL && isStart -> headText = fmtSec(snapped)
+            settings.mode == TrimMode.HEAD_TAIL -> tailText = fmtSec((dur - snapped).coerceIn(0.0, dur))
+            isStart -> startText = Formats.clock(snapped)
+            else -> endText = Formats.clock(snapped)
         }
     }
 
@@ -374,6 +392,11 @@ fun TimelineBar(
     // 0=拖 Start，1=拖 End，2=拖 Playhead
     var dragMode by remember { mutableStateOf(2) }
 
+    // 用 rememberUpdatedState 保证拖动期间值变化不触发 pointerInput 重启
+    val curReqStart by rememberUpdatedState(reqStart)
+    val curReqEnd by rememberUpdatedState(reqEnd)
+    val curPlayhead by rememberUpdatedState(playheadSec)
+
     fun xOf(t: Double): Float =
         if (widthPx > 0 && dur > 0) (t / dur * widthPx).toFloat().coerceIn(0f, widthPx) else 0f
 
@@ -388,20 +411,20 @@ fun TimelineBar(
             Modifier
                 .fillMaxWidth()
                 .height(64.dp)
-                .pointerInput(dur, playheadSec) {
+                .pointerInput(dur) {
                     detectTapGestures { offset ->
                         if (widthPx > 0 && dur > 0) {
                             onSeek(tOf(offset.x))
                         }
                     }
                 }
-                .pointerInput(dur, reqStart, reqEnd, playheadSec) {
+                .pointerInput(dur) {
                     detectDragGestures(
                         onDragStart = { offset ->
                             if (widthPx > 0 && dur > 0) {
-                                val px = xOf(playheadSec)
-                                val sx = xOf(reqStart)
-                                val ex = xOf(reqEnd)
+                                val px = xOf(curPlayhead)
+                                val sx = xOf(curReqStart)
+                                val ex = xOf(curReqEnd)
                                 dragMode = when {
                                     kotlin.math.abs(offset.x - px) <= 28f -> 2
                                     kotlin.math.abs(offset.x - sx) <= kotlin.math.abs(offset.x - ex) -> 0
@@ -415,8 +438,9 @@ fun TimelineBar(
                                 val t = tOf(change.position.x)
                                 when (dragMode) {
                                     2 -> onSeek(t)
-                                    0 -> onDragPoint(true, t)
-                                    else -> onDragPoint(false, t)
+                                    // 拖切点时同时 seek 视频预览，方便查看对应画面
+                                    0 -> { onDragPoint(true, t); onSeek(t) }
+                                    else -> { onDragPoint(false, t); onSeek(t) }
                                 }
                             }
                         },

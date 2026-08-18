@@ -105,8 +105,9 @@ fun ResultScreen(
         }
         if (success > 0) {
             Spacer(Modifier.height(8.dp))
+            val savedStr = if (saved > 0) "，共节省 ${Formats.size(saved)}" else ""
             Text(
-                "体积：${Formats.mb(successOrig)} → ${Formats.mb(successNew)}，共节省 ${Formats.mb(saved)}",
+                "体积：${Formats.size(successOrig)} → ${Formats.size(successNew)}$savedStr",
                 style = MaterialTheme.typography.bodyMedium,
                 color = BlExt.success,
             )

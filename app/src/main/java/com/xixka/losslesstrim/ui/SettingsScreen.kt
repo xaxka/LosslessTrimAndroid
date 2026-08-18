@@ -66,11 +66,11 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
             SectionCard(title = null) {
                 ChoiceField(
                     label = "关键帧对齐策略",
-                    options = listOf("宁多切（默认）", "宁少切", "自动"),
+                    options = listOf("多切", "少切（默认）", "自动"),
                     selected = settings.alignment.ordinal,
                 ) { idx -> vm.updateSettings { s -> s.copy(alignment = AlignStrategy.entries[idx]) } }
                 Text(
-                    "宁多切：起点对齐后一个关键帧、终点对齐前一个（多砍一点，保证广告清零）。宁少切反之，怕误伤正片。",
+                    "多切：起点对齐后一个关键帧、终点对齐前一个（多砍一点，保证广告清零）。少切反之，怕误伤正片。",
                     style = MaterialTheme.typography.labelSmall,
                     color = BlExt.textSecondary,
                 )

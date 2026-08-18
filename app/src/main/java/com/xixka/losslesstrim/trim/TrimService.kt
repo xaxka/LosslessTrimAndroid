@@ -287,7 +287,7 @@ class TrimService : Service() {
         }
 
         // 8. 成功：替换文件
-        var newSize = DocUtils.length(this, partUri)
+        var newSize = DocUtils.length(this, partUri).coerceAtLeast(0)
         var finalUri: Uri? = null
         if (s.overwrite) {
             if (DocUtils.exists(this, entry.docUri)) {
@@ -312,7 +312,7 @@ class TrimService : Service() {
                 reason = "输出替换失败（数据完整保留在 $partName，可手动改名）"
             )
         }
-        if (newSize <= 0) newSize = DocUtils.length(this, finalUri)
+        if (newSize <= 0) newSize = DocUtils.length(this, finalUri).coerceAtLeast(0)
         publishRunning(idx + 1, total, entry.name, 1f, "")
         return FileResult(entry, plan, Outcome.SUCCESS, entry.sizeBytes, newSize)
     }
