@@ -64,7 +64,7 @@ import com.xixka.losslesstrim.data.VideoEntry
 import com.xixka.losslesstrim.ffmpeg.Probe
 import com.xixka.losslesstrim.trim.TrimPlanner
 import com.xixka.losslesstrim.ui.theme.BlExt
-import com.xixka.losslesstrim.ui.theme.BlPrimary
+import com.xixka.losslesstrim.ui.theme.BlOutlineVariant
 import com.xixka.losslesstrim.ui.theme.BlSecondary
 import com.xixka.losslesstrim.ui.theme.BlSurfaceVariant
 import com.xixka.losslesstrim.util.Formats
@@ -194,7 +194,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
             // ---------- 时间轴 ----------
             SectionCard(
                 title = "时间轴与切点",
-                subtitle = "点击时间轴定位播放；拖动圆点调整切点（自动吸附关键帧）；红线 = 对齐后实际切点",
+                subtitle = "点击时间轴定位播放；拖动白色手柄调整切点（自动吸附关键帧）；红线 = 对齐后实际切点",
             ) {
                 if (keyframes == null) {
                     LinearProgressIndicator(
@@ -391,7 +391,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
     }
 }
 
-/** 时间轴：缩略图层 → Segment 高亮 → Start/End 手柄 → 实际切点 → Playhead（最上层） */
+/** 时间轴（素材块风格）：缩略图层 → clip 块（保留亮/裁掉暗）→ 白色手柄 → 红实际切点 → Playhead（最上层） */
 @Composable
 fun TimelineBar(
     uri: android.net.Uri,
@@ -470,39 +470,69 @@ fun TimelineBar(
             ) {
                 val w = size.width
                 val h = size.height
-                val trackTop = (h - 32f) / 2f
+                // 素材块几何：整条 clip 占满宽度，保留区亮、裁掉区暗蒙版（剪辑软件风格）
+                val blockH = 44f
+                val blockTop = (h - blockH) / 2f
+                val blockRadius = 8f
                 fun x(t: Double): Float = (t / dur * w).toFloat().coerceIn(0f, w)
 
-                // 1. 轨道背景
+                val rs = x(reqStart)
+                val re = x(reqEnd)
+
+                // 1. 素材块（圆角长方形，蓝色，模拟剪辑软件的 clip 块）
                 drawRoundRect(
-                    color = BlSurfaceVariant,
-                    topLeft = Offset(0f, trackTop),
-                    size = Size(w, 32f),
-                    cornerRadius = CornerRadius(16f, 16f),
+                    color = BlSecondary,
+                    topLeft = Offset(0f, blockTop),
+                    size = Size(w, blockH),
+                    cornerRadius = CornerRadius(blockRadius, blockRadius),
                 )
-                // 2. Segment 高亮（保留区）
-                val rx0 = x(reqStart)
-                val rx1 = x(reqEnd)
-                if (rx1 > rx0) {
-                    drawRect(
-                        color = BlPrimary.copy(alpha = 0.55f),
-                        topLeft = Offset(rx0, trackTop),
-                        size = Size(rx1 - rx0, 32f),
-                    )
+                // 2. 被裁掉的区域（片头/片尾）：深色蒙版
+                val scrim = Color(0xFF1A1C1E).copy(alpha = 0.45f)
+                if (rs > 0f) {
+                    drawRect(scrim, Offset(0f, blockTop), Size(rs, blockH))
                 }
-                // 3. 实际切点（对齐后，红）
-                drawLine(BlExt.error, Offset(x(actStart), 2f), Offset(x(actStart), h - 2f), 2f)
-                drawLine(BlExt.error, Offset(x(actEnd), 2f), Offset(x(actEnd), h - 2f), 2f)
-                // 4. Start / End 手柄
-                drawCircle(BlSecondary, radius = 11f, center = Offset(x(reqStart), h / 2))
-                drawCircle(BlSecondary, radius = 11f, center = Offset(x(reqEnd), h / 2))
-                drawCircle(Color.White, radius = 4f, center = Offset(x(reqStart), h / 2))
-                drawCircle(Color.White, radius = 4f, center = Offset(x(reqEnd), h / 2))
+                if (re < w) {
+                    drawRect(scrim, Offset(re, blockTop), Size(w - re, blockH))
+                }
+                // 3. 实际切点（对齐后，红细线，标在块内）
+                drawLine(
+                    BlExt.error,
+                    Offset(x(actStart), blockTop + 3f),
+                    Offset(x(actStart), blockTop + blockH - 3f),
+                    2f,
+                )
+                drawLine(
+                    BlExt.error,
+                    Offset(x(actEnd), blockTop + 3f),
+                    Offset(x(actEnd), blockTop + blockH - 3f),
+                    2f,
+                )
+                // 4. 起止手柄：白色竖向抓取条（上下略突出块外）
+                val handleW = 12f
+                val grip = BlOutlineVariant
+                listOf(rs, re).forEach { hx ->
+                    val left = (hx - handleW / 2).coerceIn(0f, w - handleW)
+                    drawRoundRect(
+                        color = Color.White,
+                        topLeft = Offset(left, blockTop - 8f),
+                        size = Size(handleW, blockH + 16f),
+                        cornerRadius = CornerRadius(handleW / 2, handleW / 2),
+                    )
+                    // 手柄抓取槽（3 条短横线）
+                    listOf(-7f, 0f, 7f).forEach { dy ->
+                        drawLine(
+                            color = grip,
+                            start = Offset(left + 3.5f, h / 2 + dy),
+                            end = Offset(left + handleW - 3.5f, h / 2 + dy),
+                            strokeWidth = 1.5f,
+                        )
+                    }
+                }
                 // 5. Playhead（最上层，深色竖线 + 三角头）
                 val phx = x(playheadSec)
                 drawLine(
                     color = Color(0xFF1A1C1E),
-                    start = Offset(phx, 0f),
+                    start = Offset(phx, 6f),
                     end = Offset(phx, h),
                     strokeWidth = 3f,
                 )
