@@ -1,9 +1,6 @@
 package com.xixka.losslesstrim.ui
 
-import android.graphics.Bitmap
-import android.media.MediaMetadataRetriever
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -12,7 +9,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -41,21 +37,17 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -69,8 +61,6 @@ import com.xixka.losslesstrim.ui.theme.BlOutlineVariant
 import com.xixka.losslesstrim.ui.theme.BlSecondary
 import com.xixka.losslesstrim.ui.theme.BlSurfaceVariant
 import com.xixka.losslesstrim.util.Formats
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import java.util.Locale
 import kotlin.math.abs
 
@@ -210,7 +200,6 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                     )
                 }
                 TimelineBar(
-                    uri = entry.docUri,
                     dur = dur,
                     reqStart = plan.requestedStart,
                     reqEnd = plan.requestedEnd,
@@ -392,10 +381,9 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
     }
 }
 
-/** 时间轴（三色语义）：缩略图层 → 浅灰轨道(原片全长) → 红斜纹(剪掉) + 蓝块(保留) → 白手柄 → 红虚线(实际切点) → Playhead */
+/** 时间轴（三色语义）：浅灰轨道(原片全长) → 红斜纹(剪掉) + 蓝块(保留) → 白手柄 → 红虚线(实际切点) → Playhead */
 @Composable
 fun TimelineBar(
-    uri: android.net.Uri,
     dur: Double,
     reqStart: Double,
     reqEnd: Double,
@@ -421,9 +409,6 @@ fun TimelineBar(
         if (widthPx > 0 && dur > 0) (x / widthPx * dur).coerceIn(0.0, dur) else 0.0
 
     Column {
-        // 缩略图条（等间距抽帧，不影响时间计算）
-        ThumbnailStrip(uri = uri, dur = dur)
-        Spacer(Modifier.height(4.dp))
         Box(
             Modifier
                 .fillMaxWidth()
@@ -625,66 +610,6 @@ fun TimelineBar(
                 style = MaterialTheme.typography.labelSmall,
                 color = BlExt.textSecondary,
             )
-        }
-    }
-}
-
-/** 缩略图条：等间距抽 12 帧（异步），仅视觉层，不参与时间计算 */
-@Composable
-fun ThumbnailStrip(uri: android.net.Uri, dur: Double) {
-    val context = LocalContext.current
-    val thumbs by produceState<List<Bitmap?>>(emptyList(), uri, dur) {
-        value = withContext(Dispatchers.IO) {
-            if (dur <= 0) return@withContext emptyList()
-            val mmr = MediaMetadataRetriever()
-            try {
-                mmr.setDataSource(context, uri)
-                val n = 12
-                (0 until n).map { i ->
-                    val t = ((i + 0.5) / n * dur * 1_000_000).toLong()
-                    try {
-                        mmr.getFrameAtTime(t, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                    } catch (e: Exception) {
-                        null
-                    }
-                }
-            } catch (e: Exception) {
-                emptyList()
-            } finally {
-                try {
-                    mmr.release()
-                } catch (_: Exception) {
-                }
-            }
-        }
-    }
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .height(36.dp)
-            .clip(MaterialTheme.shapes.extraSmall)
-            .background(BlSurfaceVariant),
-    ) {
-        // 生成期间仅显示空白灰条，不做占位提示
-        thumbs.forEach { b ->
-            Box(
-                Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
-                    .padding(0.5.dp)
-                    .clip(MaterialTheme.shapes.extraSmall)
-                    .background(BlSurfaceVariant),
-                contentAlignment = Alignment.Center,
-            ) {
-                if (b != null) {
-                    Image(
-                        bitmap = b.asImageBitmap(),
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                }
-            }
         }
     }
 }
