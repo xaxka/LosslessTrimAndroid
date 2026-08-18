@@ -25,10 +25,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.SkipNext
-import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
@@ -67,6 +64,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.xixka.losslesstrim.ui.theme.BlExt
 import com.xixka.losslesstrim.ui.theme.BlMono
 import com.xixka.losslesstrim.ui.theme.BlSurfaceVariant
+import com.xixka.losslesstrim.util.Formats
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -444,34 +442,38 @@ fun VideoPlayerPanel(
             }
         }
         Spacer(Modifier.height(8.dp))
-        // 五按钮
+        // 五按钮（LosslessCut 布局：|« 跳起点 / [ 设起点 / 播放暂停 / ] 设终点 / »| 跳终点）
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            IconButton(onClick = { doSeek(startSec) }, enabled = prepared) {
-                Icon(Icons.Default.SkipPrevious, contentDescription = "跳到起点")
-            }
+            FilledTonalButton(
+                onClick = { doSeek(startSec) },
+                enabled = prepared,
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp),
+            ) { Text("|«", style = MaterialTheme.typography.titleSmall) }
             FilledTonalButton(
                 onClick = { onSetStart(posMs / 1000.0) },
                 enabled = prepared,
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp),
             ) { Text("[ 起点", style = MaterialTheme.typography.labelMedium) }
             FilledIconButton(onClick = { togglePlay() }, enabled = prepared) {
-                Icon(
-                    if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    contentDescription = if (playing) "暂停" else "播放",
-                )
+                if (playing) {
+                    Text("❚❚", style = MaterialTheme.typography.labelMedium)
+                } else {
+                    Icon(Icons.Default.PlayArrow, contentDescription = "播放")
+                }
             }
             FilledTonalButton(
                 onClick = { onSetEnd(posMs / 1000.0) },
                 enabled = prepared,
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp),
             ) { Text("终点 ]", style = MaterialTheme.typography.labelMedium) }
-            IconButton(
+            FilledTonalButton(
                 onClick = { doSeek((endSec - 0.05).coerceAtLeast(0.0)) },
                 enabled = prepared,
-            ) { Icon(Icons.Default.SkipNext, contentDescription = "跳到终点") }
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp),
+            ) { Text("»|", style = MaterialTheme.typography.titleSmall) }
         }
     }
 }

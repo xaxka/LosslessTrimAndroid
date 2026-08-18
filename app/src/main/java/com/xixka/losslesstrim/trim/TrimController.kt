@@ -2,6 +2,7 @@ package com.xixka.losslesstrim.trim
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import androidx.core.content.ContextCompat
 import com.xixka.losslesstrim.data.AppSettings
 import com.xixka.losslesstrim.data.FileResult
