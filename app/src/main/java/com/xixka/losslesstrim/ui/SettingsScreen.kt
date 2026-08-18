@@ -112,15 +112,6 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
                     color = BlExt.textSecondary,
                 )
             }
-
-            GroupLabel("参数记忆")
-            SectionCard(title = null) {
-                Text(
-                    "头尾/区间参数互通：保存或应用到全部时自动换算成另一模式的对应值（片尾↔结束时间按各片时长换算），切换模式数值跟随。重启后沿用上次使用的模式与参数（DataStore）。单文件的自定义参数/轨道勾选仅在本次会话内生效。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = BlExt.textSecondary,
-                )
-            }
         }
     }
 }
