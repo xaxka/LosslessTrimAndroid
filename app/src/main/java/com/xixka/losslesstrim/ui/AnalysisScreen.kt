@@ -107,7 +107,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
         if (v == v.toLong().toDouble()) v.toLong().toString() else String.format(Locale.US, "%.1f", v)
 
     // 区间模式 -1（不切）原样显示
-    fun initIntervalText(v: Double): String = if (v < 0) "-1" else Formats.clock(v)
+    fun initIntervalText(v: Double): String = if (v < 0) "-1" else Formats.clockMs(v)
 
     var headText by remember { mutableStateOf(fmtSec(savedOverride?.headSec ?: settings.headSec)) }
     var tailText by remember { mutableStateOf(fmtSec(savedOverride?.tailSec ?: settings.tailSec)) }
@@ -141,8 +141,8 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
         when {
             settings.mode == TrimMode.HEAD_TAIL && isStart -> headText = fmtSec(snapped)
             settings.mode == TrimMode.HEAD_TAIL -> tailText = fmtSec((dur - snapped).coerceIn(0.0, dur))
-            isStart -> startText = Formats.clock(snapped)
-            else -> endText = Formats.clock(snapped)
+            isStart -> startText = Formats.clockMs(snapped)
+            else -> endText = Formats.clockMs(snapped)
         }
     }
 
@@ -179,11 +179,11 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                 onSetStart = { pos ->
                     // 头尾模式：设片头；区间模式：设开始
                     if (settings.mode == TrimMode.HEAD_TAIL) headText = fmtSec(pos.coerceIn(0.0, dur))
-                    else startText = Formats.clock(pos.coerceIn(0.0, dur))
+                    else startText = Formats.clockMs(pos.coerceIn(0.0, dur))
                 },
                 onSetEnd = { pos ->
                     if (settings.mode == TrimMode.HEAD_TAIL) tailText = fmtSec((dur - pos).coerceIn(0.0, dur))
-                    else endText = Formats.clock(pos.coerceIn(0.0, dur))
+                    else endText = Formats.clockMs(pos.coerceIn(0.0, dur))
                 },
                 onPositionChange = { playheadSec = it },
                 seekRequest = seekReq,
@@ -375,8 +375,8 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                     onClick = {
                         vm.updateSettings { s ->
                             s.copy(
-                                headSec = head,
-                                tailSec = tail,
+                                headSec = if (settings.mode == TrimMode.HEAD_TAIL) head else s.headSec,
+                                tailSec = if (settings.mode == TrimMode.HEAD_TAIL) tail else s.tailSec,
                                 intervalStartSec = if (settings.mode == TrimMode.INTERVAL) start else s.intervalStartSec,
                                 intervalEndSec = if (settings.mode == TrimMode.INTERVAL) endRaw else s.intervalEndSec,
                             )
