@@ -31,8 +31,12 @@ import java.security.MessageDigest
  */
 object ThumbStore {
 
-    /** 抽帧并发上限：逐行打开 MediaMetadataRetriever 会打爆 IO/内存（沿用原值） */
-    private val semaphore = Semaphore(2)
+    /**
+     * 抽帧并发池：列表缩略图与交互预览分池，
+     * 避免进分析页时预览排在列表抽帧后面干等（预览是用户盯着等的）。
+     */
+    private val listSemaphore = Semaphore(2)
+    private val previewSemaphore = Semaphore(2)
 
     /** 内存缓存：maxMemory/8，限幅 [4MB, 32MB]（按 byteCount 计） */
     private val memCache = object : LruCache<String, Bitmap>(
@@ -50,6 +54,9 @@ object ThumbStore {
     /** 磁盘缓存文件数上限（单张 JPEG 仅几十 KB，512 张约几十 MB） */
     private const val DISK_MAX_FILES = 512
 
+    /** 磁盘写入计数（用于清理节流） */
+    private val writeCounter = java.util.concurrent.atomic.AtomicInteger(0)
+
     private const val DISK_DIR_NAME = "thumbs"
 
     @Volatile
@@ -64,7 +71,8 @@ object ThumbStore {
 
     /**
      * 异步加载：内存 → 磁盘 → 抽帧。
-     * 拿到 permits 后二次复查缓存，避免同一 key 并发重复解码。
+     * 磁盘命中不需要排队（只是解一张小 JPEG），直接放行；
+     * 真正 expensive 的视频抽帧才进并发池，列表/预览各用各的池。
      */
     suspend fun thumb(
         context: Context,
@@ -72,14 +80,18 @@ object ThumbStore {
         uri: Uri,
         timeMs: Long = 0L,
         maxPx: Int,
+        preview: Boolean = false,
     ): Bitmap? {
         memCache.get(key)?.let { return it }
         if (failed.get(key) != null) return null
-        return semaphore.withPermit {
+        val app = context.applicationContext
+        // 磁盘缓存命中：不占用抽帧许可，即刻返回
+        withContext(Dispatchers.IO) { loadFromDisk(app, key) }?.let { return it }
+        val sem = if (preview) previewSemaphore else listSemaphore
+        return sem.withPermit {
             withContext(Dispatchers.IO) {
-                val app = context.applicationContext
                 memCache.get(key)
-                    ?: loadFromDisk(app, key)
+                    ?: loadFromDisk(app, key)   // 排队期间可能已被其它协程写入缓存
                     ?: extract(app, uri, timeMs, maxPx)?.also { bmp ->
                         memCache.put(key, bmp)
                         saveToDisk(app, key, bmp)
@@ -168,7 +180,11 @@ object ThumbStore {
         try {
             val f = diskFile(context, key)
             FileOutputStream(f).use { bmp.compress(Bitmap.CompressFormat.JPEG, 80, it) }
-            pruneDisk(diskDir(context))
+            // 每 32 次写入才扫一次目录做清理，避免每张图都 listFiles；
+            // 最坏超限 31 个文件，对缓存体积无实质影响
+            if (writeCounter.incrementAndGet() % 32 == 0) {
+                pruneDisk(diskDir(context))
+            }
         } catch (_: Exception) {
             // 磁盘缓存是加速项，写失败不影响功能
         }

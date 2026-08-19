@@ -286,8 +286,9 @@ fun FramePreview(uri: android.net.Uri, tSec: Double, label: String, timeLabel: S
             // 拖动切点时 tSec 高频变化：先挂起 200ms，跳过中间值只抽最后一帧
             delay(200)
             if (bmp == null) {
-                // 预览窗口 128x72dp，按最高密度出 384px 宽小图足够
-                bmp = ThumbStore.thumb(context, key, uri, timeMs, maxPx = 384)
+                // 预览窗口 128x72dp，按最高密度出 384px 宽小图足够；
+                // preview=true 走独立并发池，不与首页列表缩略图抢位
+                bmp = ThumbStore.thumb(context, key, uri, timeMs, maxPx = 384, preview = true)
             }
         }
     }

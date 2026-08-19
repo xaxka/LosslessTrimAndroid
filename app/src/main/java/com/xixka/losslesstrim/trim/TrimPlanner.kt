@@ -87,37 +87,34 @@ object TrimPlanner {
         }
     }
 
+    // 关键帧列表已升序：对齐查询一律二分（O(log n)）。
+    // 长视频可能有几万关键帧，列表状态页每次设置/覆盖变化都会重算全部文件，
+    // 线性扫描会在大目录下造成明显卡顿。
+
     private fun prevOrFirst(kfs: List<Double>, t: Double): Double {
         // 最后一个 ≤ t 的关键帧；没有则第一个
-        var res = kfs[0]
-        for (k in kfs) {
-            if (k <= t) res = k else break
-        }
-        return res
+        val idx = kfs.binarySearch(t)
+        val i = if (idx >= 0) idx else -(idx + 1) - 1
+        return if (i >= 0) kfs[i] else kfs[0]
     }
 
     private fun nextOrLast(kfs: List<Double>, t: Double): Double {
         // 第一个 ≥ t 的关键帧；t 已越过最后一个关键帧时保持原值：
         // 结束点本身不要求落在关键帧上，回退到最后一个关键帧会静默剪掉片尾（最多一个 GOP）
-        for (k in kfs) {
-            if (k >= t) return k
-        }
-        return t
+        val idx = kfs.binarySearch(t)
+        val i = if (idx >= 0) idx else -(idx + 1)
+        return if (i < kfs.size) kfs[i] else t
     }
 
     private fun nearest(kfs: List<Double>, t: Double): Double {
         // t 已越过最后一个关键帧时保持原值，避免"自动"策略静默剪掉片尾
         if (t >= kfs.last()) return t
-        var best = kfs[0]
-        var bestDiff = Double.MAX_VALUE
-        for (k in kfs) {
-            val d = Math.abs(k - t)
-            if (d < bestDiff) {
-                bestDiff = d
-                best = k
-            }
-        }
-        return best
+        val idx = kfs.binarySearch(t)
+        if (idx >= 0) return kfs[idx]
+        val ip = -(idx + 1)          // 第一个 > t 的位置
+        val right = kfs[ip]          // t < last 保证存在
+        val left = if (ip > 0) kfs[ip - 1] else null
+        return if (left == null || (right - t) <= (t - left)) right else left
     }
 }
 
