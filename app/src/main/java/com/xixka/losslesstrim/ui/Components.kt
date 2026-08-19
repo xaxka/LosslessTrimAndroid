@@ -1,9 +1,6 @@
 package com.xixka.losslesstrim.ui
 
-import android.content.Context
-import android.graphics.Bitmap
 import android.graphics.SurfaceTexture
-import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.view.Surface
 import android.view.TextureView
@@ -52,7 +49,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -72,11 +68,9 @@ import com.xixka.losslesstrim.ui.theme.BlExt
 import com.xixka.losslesstrim.ui.theme.BlMono
 import com.xixka.losslesstrim.ui.theme.BlSurfaceVariant
 import com.xixka.losslesstrim.util.Formats
-import kotlinx.coroutines.Dispatchers
+import com.xixka.losslesstrim.util.ThumbStore
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
-import kotlinx.coroutines.withContext
+import kotlin.math.roundToLong
 
 /**
  * Blue Light UI 基础组件。
@@ -247,17 +241,16 @@ fun ChoiceField(
     }
 }
 
-/** 视频缩略图（surfaceVariant 占位） */
-
-/** 缩略图抽帧并发上限：列表逐行各开 MediaMetadataRetriever 会打爆 IO/内存 */
-private val thumbSemaphore = Semaphore(2)
-
+/** 视频缩略图（surfaceVariant 占位）；走 ThumbStore 全局缓存，二次进入页面秒出、不重复抽帧 */
 @Composable
 fun VideoThumb(uri: android.net.Uri, modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    val bmp by produceState<Bitmap?>(null, uri) {
-        value = thumbSemaphore.withPermit {
-            withContext(Dispatchers.IO) { extractThumb(context, uri) }
+    val key = remember(uri) { ThumbStore.keyOf(uri) }
+    var bmp by remember(uri) { mutableStateOf(ThumbStore.peek(key)) }
+    LaunchedEffect(key) {
+        if (bmp == null) {
+            // 列表缩略图显示 96x54dp，按最高密度 ~3x 出 288px 宽小图即可
+            bmp = ThumbStore.thumb(context, key, uri, timeMs = 0L, maxPx = 288)
         }
     }
     Box(
@@ -281,25 +274,20 @@ fun VideoThumb(uri: android.net.Uri, modifier: Modifier = Modifier) {
     }
 }
 
-/** 切点处抽帧预览 */
+/** 切点处抽帧预览；走 ThumbStore 缓存（同一时间点不重复抽帧、只出小图，杜绝拖动时内存暴涨） */
 @Composable
 fun FramePreview(uri: android.net.Uri, tSec: Double, label: String, timeLabel: String) {
     val context = LocalContext.current
-    val bmp by produceState<Bitmap?>(null, uri, tSec) {
-        // 拖动切点时 tSec 高频变化：先挂起 200ms，跳过中间值只抽最后一帧
-        delay(200)
-        value = withContext(Dispatchers.IO) {
-            val mmr = MediaMetadataRetriever()
-            try {
-                mmr.setDataSource(context, uri)
-                mmr.getFrameAtTime((tSec * 1_000_000).toLong(), MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-            } catch (e: Exception) {
-                null
-            } finally {
-                try {
-                    mmr.release()
-                } catch (_: Exception) {
-                }
+    val timeMs = (tSec * 1000.0).roundToLong()
+    val key = remember(uri, timeMs) { ThumbStore.keyOf(uri, timeMs) }
+    var bmp by remember(uri, timeMs) { mutableStateOf(ThumbStore.peek(key)) }
+    LaunchedEffect(key) {
+        if (bmp == null) {
+            // 拖动切点时 tSec 高频变化：先挂起 200ms，跳过中间值只抽最后一帧
+            delay(200)
+            if (bmp == null) {
+                // 预览窗口 128x72dp，按最高密度出 384px 宽小图足够
+                bmp = ThumbStore.thumb(context, key, uri, timeMs, maxPx = 384)
             }
         }
     }
@@ -592,22 +580,3 @@ fun BlOutlinedButton(
     )
 }
 
-private fun extractThumb(context: Context, uri: android.net.Uri): Bitmap? {
-    val mmr = MediaMetadataRetriever()
-    return try {
-        mmr.setDataSource(context, uri)
-        val frame = mmr.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-        frame?.let { b ->
-            val w = 192
-            val h = (b.height.toLong() * w / b.width.coerceAtLeast(1)).toInt().coerceAtLeast(1)
-            Bitmap.createScaledBitmap(b, w, h, true)
-        }
-    } catch (e: Exception) {
-        null
-    } finally {
-        try {
-            mmr.release()
-        } catch (_: Exception) {
-        }
-    }
-}

@@ -9,7 +9,7 @@ import com.xixka.losslesstrim.data.StreamInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.util.concurrent.ConcurrentHashMap
+import java.util.Collections
 
 /**
  * ffprobe 封装：媒体信息（流列表）+ 关键帧位置探测。
@@ -17,8 +17,16 @@ import java.util.concurrent.ConcurrentHashMap
  */
 object Probe {
 
-    /** 关键帧缓存（uri string → 升序关键帧时间列表），进程内复用 */
-    val keyframeCache = ConcurrentHashMap<String, List<Double>>()
+    /** 关键帧缓存上限（视频条数）：防止长时间使用 / 换多个目录后无限增长 */
+    private const val KEYFRAME_CACHE_MAX = 64
+
+    /** 关键帧缓存（uri string → 升序关键帧时间列表），进程内复用，LRU 淘汰 */
+    private val keyframeCache = Collections.synchronizedMap(
+        object : LinkedHashMap<String, List<Double>>(16, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<Double>>?): Boolean =
+                size > KEYFRAME_CACHE_MAX
+        }
+    )
 
     suspend fun probeMedia(context: Context, uri: Uri): ProbeResult = withContext(Dispatchers.IO) {
         try {
@@ -44,14 +52,16 @@ object Probe {
         keyframeCache[uri.toString()]?.let { return@withContext it }
         try {
             val input = FFmpegKitConfig.getSafParameterForRead(context, uri)
+            // CSV 而非 JSON：长视频全量 packet 输出可达几十 MB，CSV 体积约减半，
+            // 且免去 JSONObject 整树解析的内存峰值（这是批处理时 OOM 的主要诱因之一）
             val session = FFprobeKit.execute(
-                "-v error -select_streams v:0 -show_entries packet=pts_time,flags -of json -i \"$input\""
+                "-v error -select_streams v:0 -show_entries packet=pts_time,flags -of csv=p=0 -i \"$input\""
             )
             val output = session.allLogsAsString
             val rc = session.returnCode
             if (rc != null && rc.isValueSuccess && !output.isNullOrBlank()) {
                 // 仅成功结果写入缓存；失败不缓存，避免同一文件整个进程周期内都无法重试对齐
-                val parsed = parseKeyframeJson(output)
+                val parsed = parseKeyframeCsv(output)
                 keyframeCache[uri.toString()] = parsed
                 parsed
             } else {
@@ -108,22 +118,27 @@ object Probe {
         }
     }
 
-    private fun parseKeyframeJson(json: String): List<Double> {
-        return try {
-            val root = JSONObject(json)
-            val packets = root.optJSONArray("packets") ?: return emptyList()
-            val kfs = ArrayList<Double>()
-            for (i in 0 until packets.length()) {
-                val p = packets.optJSONObject(i) ?: continue
-                val flags = p.optString("flags", "")
-                val t = p.optString("pts_time", "").toDoubleOrNull() ?: continue
-                if (t >= 0 && flags.contains("K")) kfs.add(t)
-            }
-            kfs.sort()
-            kfs
-        } catch (e: Exception) {
-            emptyList()
+    /**
+     * 解析 `-show_entries packet=pts_time,flags -of csv=p=0` 的逐行输出：
+     * p=0 时形如 `0.000000,__K`（部分版本会带 `packet,` 前缀），
+     * 末列 flags 含 K 即关键帧；在前面各列里取第一个可解析的时间。
+     * 容错：跳过乱入的错误日志行与 pts_time 缺失的行。
+     */
+    private fun parseKeyframeCsv(csv: String): List<Double> {
+        val kfs = ArrayList<Double>()
+        for (line in csv.lineSequence()) {
+            if (line.isEmpty()) continue
+            val parts = line.split(',')
+            if (parts.size < 2) continue
+            val flags = parts.last().trim()
+            if (!flags.contains('K')) continue
+            val t = parts.asSequence()
+                .dropLast(1)
+                .firstNotNullOfOrNull { it.trim().toDoubleOrNull() }
+            if (t != null && t >= 0) kfs.add(t)
         }
+        kfs.sort()
+        return kfs
     }
 
     private fun tailOf(text: String, max: Int): String {
