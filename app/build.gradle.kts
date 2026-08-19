@@ -1,6 +1,25 @@
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+// 版本号规则（Asia/Shanghai 时区，按构建时刻生成）：
+//   versionName = YY.MM.DD             例 26.08.19
+//   versionCode = YYMMDDHHt（9 位整数）例 260819143（t = 分钟的十分钟位 0-5）
+// CI 通过 -PversionName / -PversionCode 显式传入（保证一次流水线内产物一致）；
+// 本地构建未传参时按当前时间生成。versionCode 上限 991231235 < 2100000000，合法。
+fun devVersionName(): String =
+    ZonedDateTime.now(ZoneId.of("Asia/Shanghai"))
+        .format(DateTimeFormatter.ofPattern("yy.MM.dd"))
+
+fun devVersionCode(): Int {
+    val now = ZonedDateTime.now(ZoneId.of("Asia/Shanghai"))
+    val base = now.format(DateTimeFormatter.ofPattern("yyMMddHH")).toInt()
+    return base * 10 + now.minute / 10
 }
 
 android {
@@ -11,8 +30,8 @@ android {
         applicationId = "com.xixka.losslesstrim"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "2.3"
+        versionCode = findProperty("versionCode")?.toString()?.toInt() ?: devVersionCode()
+        versionName = findProperty("versionName")?.toString() ?: devVersionName()
         ndk {
             abiFilters += listOf("arm64-v8a")
         }

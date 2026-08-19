@@ -5,6 +5,10 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+# 发布 Release / 移动 dev 标签需要写权限
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -21,10 +25,36 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # 版本号规则（Asia/Shanghai 时区）：
+      #   versionName = YY.MM.DD             例 26.08.19
+      #   versionCode = YYMMDDHHt（9 位整数）例 260819143（t = 分钟的十分钟位 0-5）
+      - name: Generate version
+        run: |
+          VERSION_NAME="$(TZ=Asia/Shanghai date +%y.%m.%d)"
+          T="$(( $(TZ=Asia/Shanghai date +%M) / 10 ))"
+          VERSION_CODE="$(TZ=Asia/Shanghai date +%y%m%d%H)${T}"
+          echo "VERSION_NAME=${VERSION_NAME}" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=${VERSION_CODE}" >> "$GITHUB_ENV"
+          # head_commit.timestamp 仅 push 事件存在，手动触发时回退为当前时间
+          BUILT_AT='${{ github.event.head_commit.timestamp }}'
+          if [ -z "$BUILT_AT" ]; then
+            BUILT_AT="$(TZ=Asia/Shanghai date '+%Y-%m-%dT%H:%M:%S%z')"
+          fi
+          echo "BUILT_AT=${BUILT_AT}" >> "$GITHUB_ENV"
+          echo "versionName=$VERSION_NAME versionCode=$VERSION_CODE builtAt=$BUILT_AT"
+
       - name: Build release APK
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon --stacktrace
+          ./gradlew assembleRelease --no-daemon --stacktrace \
+            -PversionName="${VERSION_NAME}" -PversionCode="${VERSION_CODE}"
+
+      - name: Rename APK with version
+        run: |
+          APK="$(ls app/build/outputs/apk/release/*.apk | head -1)"
+          NEW="app/build/outputs/apk/release/LosslessTrimAndroid-v${VERSION_NAME}-${VERSION_CODE}.apk"
+          mv "$APK" "$NEW"
+          ls -l "$NEW"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -32,3 +62,20 @@ jobs:
           name: LosslessTrimAndroid-release-apk
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+
+      # 删除旧 dev 标签，让发布动作在当前提交上重建（否则标签停在首次发布的旧提交）
+      - name: Reset dev tag
+        run: git push origin :refs/tags/dev || true
+
+      - name: Publish dev build to GitHub Releases
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: dev
+          name: dev
+          body: |
+            - Branch: ${{ github.ref_name }}
+            - Commit: ${{ github.sha }}
+            - Built at: ${{ env.BUILT_AT }}
+            - Version: v${{ env.VERSION_NAME }} (${{ env.VERSION_CODE }})
+          prerelease: true
+          files: app/build/outputs/apk/release/*.apk
