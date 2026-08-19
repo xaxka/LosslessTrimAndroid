@@ -52,7 +52,7 @@ jobs:
       - name: Rename APK with version
         run: |
           APK="$(ls app/build/outputs/apk/release/*.apk | head -1)"
-          NEW="app/build/outputs/apk/release/LosslessTrimAndroid-v${VERSION_NAME}-${VERSION_CODE}.apk"
+          NEW="app/build/outputs/apk/release/LosslessTrimAndroid-v${VERSION_NAME}.apk"
           mv "$APK" "$NEW"
           ls -l "$NEW"
 
