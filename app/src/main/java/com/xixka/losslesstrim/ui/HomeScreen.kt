@@ -74,6 +74,7 @@ fun HomeScreen(
     val statuses by vm.statuses.collectAsState()
     val scanning by vm.scanning.collectAsState()
     val scanMsg by vm.scanMsg.collectAsState()
+    val orphans by vm.orphans.collectAsState()
     val processable by vm.processableCount.collectAsState()
     val spaceWarning by vm.spaceWarning.collectAsState()
     val treeUri by vm.treeUri.collectAsState()
@@ -254,6 +255,20 @@ fun HomeScreen(
                         if (isSingle) singleLauncher.launch(arrayOf("video/*"))
                         else folderLauncher.launch(null)
                     }) { Text(if (isSingle) "重新选择文件" else "更换文件夹") }
+                }
+                if (orphans.isNotEmpty()) {
+                    Text(
+                        "⚠ 发现上次中断遗留的临时文件：" +
+                                orphans.take(2).joinToString("、") +
+                                (if (orphans.size > 2) " 等 ${orphans.size} 个" else "") +
+                                "。若原文件损坏，可把对应的 .trimbackup 备份改名还原",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = BlExt.warning,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 2.dp),
+                        maxLines = 3,
+                    )
                 }
                 if (scanning) {
                     Row(

@@ -53,6 +53,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val _scanMsg = MutableStateFlow<String?>(null)
     val scanMsg = _scanMsg.asStateFlow()
 
+    /** 扫描发现的残留中间文件（.trimbackup / .part / .oldtrim），用于恢复提示 */
+    private val _orphans = MutableStateFlow<List<String>>(emptyList())
+    val orphans = _orphans.asStateFlow()
+
     private val _treeUri = MutableStateFlow<Uri?>(null)
     val treeUri = _treeUri.asStateFlow()
 
@@ -150,6 +154,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _treeUri.value = null
         _scanning.value = true
         _scanMsg.value = null
+        _orphans.value = emptyList()
         scanJob?.cancel()
         scanJob = viewModelScope.launch {
             try {
@@ -186,8 +191,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _scanMsg.value = null
         scanJob = viewModelScope.launch {
             try {
-                val list = Scanner.scanFolder(getApplication(), tree)
+                val result = Scanner.scanFolder(getApplication(), tree)
+                val list = result.entries
                 _files.value = list
+                _orphans.value = result.orphans
                 _scanMsg.value = when {
                     list.isEmpty() -> "该文件夹里没有找到视频文件"
                     else -> {
@@ -198,6 +205,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } catch (e: Exception) {
                 _files.value = emptyList()
+                _orphans.value = emptyList()
                 _scanMsg.value = "扫描失败：${e.message}"
             } finally {
                 _scanning.value = false

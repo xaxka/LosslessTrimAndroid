@@ -257,6 +257,15 @@ class TrimService : Service() {
                 return FileResult(entry, plan, Outcome.FAILED, entry.sizeBytes, reason = extractError(session))
             }
             val newSize = DocUtils.length(this, job.outputUri).coerceAtLeast(0)
+            // 终检：输出必须真实可解析（防"ffprobe 找不到 moov"这类坏文件冒充成功）
+            val outProbe = Probe.probeMedia(this, job.outputUri)
+            if (newSize <= 0 || !outProbe.probeOk) {
+                DocUtils.delete(this, job.outputUri)
+                return FileResult(
+                    entry, plan, Outcome.FAILED, entry.sizeBytes,
+                    reason = "输出校验失败（${outProbe.error ?: "空文件"}），请重试"
+                )
+            }
             publishRunning(idx + 1, total, entry.name, 1f, "")
             return FileResult(entry, plan, Outcome.SUCCESS, entry.sizeBytes, newSize, reason = "已另存为新文件")
         }
@@ -312,18 +321,23 @@ class TrimService : Service() {
             return FileResult(entry, plan, Outcome.FAILED, entry.sizeBytes, reason = extractError(session))
         }
 
-        // 8. 成功：替换文件
-        var newSize = DocUtils.length(this, partUri).coerceAtLeast(0)
+        // 8. 成功：替换文件（铁律：备份未做成绝不动原片；最终文件未校验绝不删备份）
+        val partLen = DocUtils.length(this, partUri).coerceAtLeast(0)
         var finalUri: Uri? = null
+        var backupUri: Uri? = null      // 覆盖模式：原片备份
+        var displacedUri: Uri? = null   // CutVideos 模式：被顶替的旧成片
         if (s.overwrite) {
-            // 安全顺序：先把原文件改名备份 → 落最终文件 → 成功后才删备份；失败可回滚，绝不先删原件
             val backupName = "${entry.baseName}.trimbackup.${System.currentTimeMillis()}"
-            var backupUri: Uri? = null
             if (DocUtils.exists(this, entry.docUri)) {
                 backupUri = DocUtils.rename(this, entry.docUri, backupName)
                 if (backupUri == null) {
-                    // 备份失败（目录不支持 rename）：.part 已成功生成，退回先删原件的旧兜底路径
-                    DocUtils.delete(this, entry.docUri)
+                    // 备份改名失败（该目录不支持 rename 等）：直接跳过此文件，
+                    // 绝不再走"先删原件再拷贝"的老路——那样一旦中途闪退就留下无备份的半截文件
+                    DocUtils.delete(this, partUri)
+                    return FileResult(
+                        entry, plan, Outcome.FAILED, entry.sizeBytes,
+                        reason = "无法备份原片（此目录不支持改名），已跳过，原文件未动"
+                    )
                 }
             }
             finalUri = DocUtils.rename(this, partUri, finalName)
@@ -331,17 +345,13 @@ class TrimService : Service() {
                 finalUri = DocUtils.copyTo(this, partUri, outFolder, target.mime, finalName)
                 if (finalUri != null) DocUtils.delete(this, partUri)
             }
-            if (finalUri == null) {
-                // 回滚：把备份改回原文件名，数据仍完整
-                backupUri?.let { DocUtils.rename(this, it, entry.name) }
-                return FileResult(
-                    entry, plan, Outcome.FAILED, entry.sizeBytes,
-                    reason = "输出替换失败（数据完整保留在 $partName，可手动改名）"
-                )
-            }
-            backupUri?.let { DocUtils.delete(this, it) }
         } else {
-            DocUtils.findChild(this, outFolder, finalName)?.let { DocUtils.delete(this, it) }
+            val existing = DocUtils.findChild(this, outFolder, finalName)
+            if (existing != null) {
+                // 旧成片先改名挪走而不是直接删：万一新输出校验失败还能还原
+                displacedUri = DocUtils.rename(this, existing, "$finalName.oldtrim")
+                if (displacedUri == null) DocUtils.delete(this, existing)
+            }
             finalUri = DocUtils.rename(this, partUri, finalName)
             if (finalUri == null) {
                 finalUri = DocUtils.copyTo(this, partUri, outFolder, target.mime, finalName)
@@ -349,19 +359,33 @@ class TrimService : Service() {
             }
         }
         if (finalUri == null) {
+            // 回滚：备份/旧成片还原原名，数据完整
+            backupUri?.let { DocUtils.rename(this, it, entry.name) }
+            displacedUri?.let { DocUtils.rename(this, it, finalName) }
             return FileResult(
                 entry, plan, Outcome.FAILED, entry.sizeBytes,
                 reason = "输出替换失败（数据完整保留在 $partName，可手动改名）"
             )
         }
-        if (newSize <= 0) newSize = DocUtils.length(this, finalUri).coerceAtLeast(0)
-        // 终检：最终文件实测为 0 字节（查询成功且为 0）视为失败，避免空文件冒充成功
-        if (DocUtils.length(this, finalUri) == 0L) {
+
+        // 终检一：最终文件字节数必须与 .part 一致（中途被打断的拷贝会缺尾）
+        val finalLen = DocUtils.length(this, finalUri).coerceAtLeast(0)
+        val sizeBad = partLen > 0 && finalLen != partLen
+        // 终检二：输出必须真的能被 ffprobe 解析（防 moov 缺失等坏文件冒充成功）
+        val finalProbe = Probe.probeMedia(this, finalUri)
+        if (sizeBad || !finalProbe.probeOk) {
+            DocUtils.delete(this, finalUri)
+            backupUri?.let { DocUtils.rename(this, it, entry.name) }       // 还原原片
+            displacedUri?.let { DocUtils.rename(this, it, finalName) }     // 还原旧成片
             return FileResult(
                 entry, plan, Outcome.FAILED, entry.sizeBytes,
-                reason = "输出文件异常（0 字节），请重试"
+                reason = "输出校验失败（${finalProbe.error ?: "字节数不一致"}）${if (backupUri != null) "，已回滚为原文件" else ""}，请重试"
             )
         }
+        // 校验通过，才允许删除备份与残留
+        backupUri?.let { DocUtils.delete(this, it) }
+        displacedUri?.let { DocUtils.delete(this, it) }
+        val newSize = if (finalLen > 0) finalLen else partLen
         publishRunning(idx + 1, total, entry.name, 1f, "")
         return FileResult(entry, plan, Outcome.SUCCESS, entry.sizeBytes, newSize)
     }
