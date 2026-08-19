@@ -132,8 +132,7 @@ object Probe {
             if (parts.size < 2) continue
             val flags = parts.last().trim()
             if (!flags.contains('K')) continue
-            val t = parts.asSequence()
-                .dropLast(1)
+            val t = parts.dropLast(1)
                 .firstNotNullOfOrNull { it.trim().toDoubleOrNull() }
             if (t != null && t >= 0) kfs.add(t)
         }
