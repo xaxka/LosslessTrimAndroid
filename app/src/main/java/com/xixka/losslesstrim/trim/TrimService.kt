@@ -20,6 +20,7 @@ import com.antonkarpenko.ffmpegkit.FFmpegSession
 import com.xixka.losslesstrim.data.FileResult
 import com.xixka.losslesstrim.data.Outcome
 import com.xixka.losslesstrim.data.TrimPlan
+import com.xixka.losslesstrim.data.VideoEntry
 import com.xixka.losslesstrim.ffmpeg.Probe
 import com.xixka.losslesstrim.ffmpeg.SessionBridge
 import com.xixka.losslesstrim.util.Formats
