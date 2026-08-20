@@ -50,12 +50,20 @@ object TrimController {
             if (running) return false
             pendingJobs = jobs
             cancelRequested = false
+            // 提前占位：running 若只在 Service 协程里置位，startForegroundService 的
+            // IPC 延迟期间二次 start() 会通过检查并覆盖 pendingJobs，导致两条队列
+            // 并发执行（两个 ffmpeg 同时写同一个 .part）或首批任务被静默丢弃
+            running = true
         }
         val intent = Intent(context, TrimService::class.java).setAction(TrimService.ACTION_START)
         return try {
             ContextCompat.startForegroundService(context, intent)
             true
         } catch (e: Exception) {
+            synchronized(lock) {
+                running = false
+                pendingJobs = emptyList()
+            }
             false
         }
     }

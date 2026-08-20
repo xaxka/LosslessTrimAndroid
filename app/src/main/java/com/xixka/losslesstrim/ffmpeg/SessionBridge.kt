@@ -2,6 +2,7 @@ package com.xixka.losslesstrim.ffmpeg
 
 import com.antonkarpenko.ffmpegkit.FFmpegKitConfig
 import com.antonkarpenko.ffmpegkit.Statistics
+import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -23,7 +24,14 @@ object SessionBridge {
     private val logBuffers = ConcurrentHashMap<Long, StringBuilder>()
 
     /** 已结束、日志已定格待消费的会话（ffmpeg 完成回调先于 extractError 消费） */
-    private val doneLogs = ConcurrentHashMap<Long, String>()
+    private val doneLogs: MutableMap<Long, String> = Collections.synchronizedMap(
+        object : LinkedHashMap<Long, String>(16, 0.75f, true) {
+            // 上限防泄漏：成功路径的会话无人消费（extractError 仅失败时取），
+            // 长批量任务下不能让定格日志无限积压；32 条绰绰有余（串行队列）
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, String>?): Boolean =
+                size > 32
+        }
+    )
 
     /** 进度统计路由：sessionId → 处理器 */
     private val statHandlers = ConcurrentHashMap<Long, (Double, Double) -> Unit>()
