@@ -151,7 +151,8 @@ private fun GroupLabel(text: String) {
 private fun UpdateSection() {
     val context = LocalContext.current
     val updState by Updater.state.collectAsState()
-    val current by remember { Updater.currentVersion(context) }
+    // remember 返回普通值而非 State，不能用作 by 委托
+    val current = remember { Updater.currentVersion(context) }
 
     // "允许安装未知应用"授权状态：从系统授权页返回（ON_RESUME）时刷新
     var installAllowed by remember { mutableStateOf(Updater.canInstall(context)) }
