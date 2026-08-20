@@ -272,6 +272,24 @@ private fun UpdateSection() {
                 ) { Text("安装") }
             }
 
+            Updater.State.Installing -> {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                Text(
+                    "已提交安装，请在系统弹出的确认页完成安装…",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.secondary,
+                )
+                Text(
+                    "若确认页未自动弹出，可稍候重试或从系统通知中查看安装请求",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = BlExt.textSecondary,
+                )
+                BlOutlinedButton(
+                    onClick = { Updater.retryInstall() },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("重新安装") }
+            }
+
             is Updater.State.Error -> Text(
                 s.message,
                 style = MaterialTheme.typography.labelSmall,

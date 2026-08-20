@@ -1,9 +1,14 @@
 package com.xixka.losslesstrim.update
 
+import android.app.PendingIntent
 import android.content.ActivityNotFoundException
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageInstaller
 import android.net.Uri
+import android.os.Build
 import android.os.SystemClock
 import android.provider.Settings
 import androidx.core.content.FileProvider
@@ -27,6 +32,7 @@ import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.UnknownHostException
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 应用内更新：GitHub Releases 查版本 → 下载 APK → 拉起系统安装器。
@@ -63,6 +69,9 @@ object Updater {
         data object UpToDate : State
         data class Downloading(val received: Long, val total: Long) : State
         data class ReadyToInstall(val info: ReleaseInfo, val apk: File) : State
+
+        /** 已提交 PackageInstaller 会话，等待系统安装确认/结果 */
+        data object Installing : State
         data class Error(val message: String) : State
     }
 
@@ -115,7 +124,8 @@ object Updater {
                 // 清掉上次残留（旧版本 APK / 未完成的 .part）
                 dir.listFiles()?.forEach { f -> f.delete() }
                 val apk = downloadTo(info, dir)
-                state.value = State.ReadyToInstall(info, apk)
+                lastReady = State.ReadyToInstall(info, apk)
+                state.value = lastReady
             } catch (e: CancellationException) {
                 // 用户取消：回到"发现新版本"，可重新下载
                 state.value = State.Available(info)
@@ -130,9 +140,37 @@ object Updater {
         downloadJob?.cancel()
     }
 
-    /** 拉起系统安装器安装已下载的更新包 */
+    /** 会话安装结果回调的 action（PendingIntent 广播，仅本应用可收） */
+    private const val ACTION_INSTALL_RESULT =
+        "com.xixka.losslesstrim.update.INSTALL_RESULT"
+
+    /** 会话安装防重入 */
+    private val sessionInstalling = AtomicBoolean(false)
+
+    /** 最近一次"更新包已就绪"状态（Installing 卡死时恢复重试入口用） */
+    private var lastReady: State.ReadyToInstall? = null
+
+    /** 会话安装的运行时接收器（Installing 期间存活，终态注销） */
+    private var installReceiver: BroadcastReceiver? = null
+
+    /** 注册接收器所用的 app context（注销时用同一个） */
+    private var installReceiverContext: Context? = null
+
+    /**
+     * 安装已下载的更新包，两级路径：
+     *
+     * 1. ACTION_VIEW 拉起系统安装器——标准 UX，但部分设备/ROM（targetSdk 34 +
+     *    Android 14/15，个别国产定制系统）的安装器 Activity 不解析该隐式 intent，
+     *    抛 ActivityNotFoundException（"未找到可用的安装器"即由此来）；
+     * 2. 兜底 PackageInstaller 会话 API——系统为应用安装提供的正式通道（应用商店
+     *    均走此路），不依赖 intent 解析，ROM 兼容性最好。提交后系统经
+     *    PENDING_USER_ACTION 回调下发确认页 intent，由我们拉起，最终确认/安装
+     *    结果再经回调返回。
+     */
     fun install(context: Context) {
         val st = state.value as? State.ReadyToInstall ?: return
+
+        // 路径 1：ACTION_VIEW（标准安装器 UI）
         try {
             val uri = FileProvider.getUriForFile(
                 context, "${context.packageName}.fileprovider", st.apk
@@ -140,13 +178,185 @@ object Updater {
             val intent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, APK_MIME)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                // 防御：若调用方传入非 Activity context 时必需
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             context.startActivity(intent)
+            return
         } catch (_: ActivityNotFoundException) {
-            state.value = State.Error("未找到可用的安装器，无法安装")
-        } catch (e: Exception) {
-            state.value = State.Error("无法启动安装：${e.message ?: "未知错误"}")
+            // 该设备安装器不响应 ACTION_VIEW：转 PackageInstaller 会话安装
+        } catch (_: Exception) {
+            // FileProvider 失败等：同样尝试会话路径，两条路都失败才报错
         }
+
+        // 路径 2：PackageInstaller 会话 API
+        installWithSession(context.applicationContext, st.info, st.apk)
+    }
+
+    /**
+     * PackageInstaller 会话安装：建会话 → 写入 APK → commit（带回调）。
+     * 用户确认页由系统回调 PENDING_USER_ACTION 下发的 intent 拉起。
+     */
+    private fun installWithSession(app: Context, info: ReleaseInfo, apk: File) {
+        if (sessionInstalling.getAndSet(true)) return
+
+        // 先注册结果接收器，再提交会话（顺序不能反，避免错过首个回调）
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context, intent: Intent) {
+                val status = intent.getIntExtra(
+                    PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE
+                )
+                when (status) {
+                    PackageInstaller.STATUS_PENDING_USER_ACTION -> {
+                        // 系统下发确认页 intent，必须由应用拉起（仍是安装器 UI）
+                        val confirm = parcelableIntent(intent)
+                        if (confirm != null) {
+                            try {
+                                confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                app.startActivity(confirm)
+                            } catch (_: Exception) {
+                                finishSessionInstall()
+                                state.value = State.Error("无法启动安装确认页，请手动安装")
+                            }
+                        } else {
+                            finishSessionInstall()
+                            state.value = State.Error("安装请求被系统拒绝")
+                        }
+                    }
+
+                    PackageInstaller.STATUS_SUCCESS -> {
+                        // 安装成功后应用进程随即被系统替换重启，这里基本来不及展示
+                        finishSessionInstall()
+                        state.value = State.Idle
+                    }
+
+                    else -> {
+                        finishSessionInstall()
+                        if (status == PackageInstaller.STATUS_FAILURE_ABORTED && apk.isFile) {
+                            // 用户在系统确认页取消：回到"已就绪"，安装按钮可直接重试
+                            state.value = State.ReadyToInstall(info, apk)
+                        } else {
+                            state.value = State.Error("安装失败：${friendlyInstallStatus(status, intent)}")
+                        }
+                    }
+                }
+            }
+        }
+        unregisterInstallReceiver(app)
+        installReceiver = receiver
+        installReceiverContext = app
+        val filter = IntentFilter(ACTION_INSTALL_RESULT)
+        if (Build.VERSION.SDK_INT >= 33) {
+            // Android 13+ 运行时接收器必须声明 exported 与否；PendingIntent 广播
+            // 按创建者（本应用）身份投递，NOT_EXPORTED 即可接收
+            app.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            // 旧平台无此要求，普通注册即可（本应用自发的广播不存在跨应用问题）
+            app.registerReceiver(receiver, filter)
+        }
+
+        try {
+            val installer = app.packageManager.packageInstaller
+            val params = PackageInstaller.SessionParams(
+                PackageInstaller.SessionParams.MODE_FULL_INSTALL
+            )
+            val sessionId = installer.createSession(params)
+            val session = installer.openSession(sessionId)
+            try {
+                apk.inputStream().use { input ->
+                    session.openWrite("package", 0, apk.length()).use { out ->
+                        input.copyTo(out)
+                        session.fsync(out)
+                    }
+                }
+                // PendingIntent 广播按创建者（本应用）身份投递，NOT_EXPORTED 接收器可收；
+                // 系统需向 intent 填充状态 extras，Android 12+ 必须显式 FLAG_MUTABLE
+                val resultIntent = Intent(ACTION_INSTALL_RESULT).setPackage(app.packageName)
+                val pi = PendingIntent.getBroadcast(
+                    app, sessionId, resultIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or
+                        if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0
+                )
+                session.commit(pi.intentSender)
+                state.value = State.Installing
+            } finally {
+                session.close()   // commit 后 close 不会放弃会话
+            }
+        } catch (e: Exception) {
+            finishSessionInstall()
+            state.value = State.Error(
+                "无法发起安装：${e.message ?: e.javaClass.simpleName}"
+            )
+        }
+    }
+
+    /** 注销结果接收器并复位防重入标志（终态调用） */
+    private fun finishSessionInstall() {
+        sessionInstalling.set(false)
+        val ctx = installReceiverContext
+        val rcv = installReceiver
+        if (ctx != null && rcv != null) {
+            try {
+                ctx.unregisterReceiver(rcv)
+            } catch (_: Exception) {
+                // 未注册/已注销：忽略
+            }
+        }
+        installReceiver = null
+        installReceiverContext = null
+    }
+
+    /**
+     * Installing 卡死（个别 ROM 回调丢失/确认页未弹出）时的手动恢复：
+     * 丢弃本次会话回到"已就绪"，可重新点安装。
+     */
+    fun retryInstall() {
+        if (state.value !is State.Installing) return
+        finishSessionInstall()
+        val ready = lastReady
+        if (ready != null && ready.apk.isFile) {
+            state.value = ready
+        } else {
+            lastInfo?.let { state.value = State.Available(it) }
+        }
+    }
+
+    private fun unregisterInstallReceiver(app: Context) {
+        installReceiver?.let {
+            try {
+                app.unregisterReceiver(it)
+            } catch (_: Exception) {
+            }
+        }
+        installReceiver = null
+        installReceiverContext = null
+    }
+
+    /** 兼容 API 33+ 的 getParcelableExtra 类型安全版本 */
+    private fun parcelableIntent(intent: Intent): Intent? =
+        if (Build.VERSION.SDK_INT >= 33) {
+            intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(Intent.EXTRA_INTENT)
+        }
+
+    /** PackageInstaller 状态码 → 可读文案（系统原始消息仅在无专属文案时兜底） */
+    private fun friendlyInstallStatus(status: Int, intent: Intent): String = when (status) {
+        PackageInstaller.STATUS_FAILURE_ABORTED ->
+            "已取消（在系统确认页选择了取消或拒绝）"
+        PackageInstaller.STATUS_FAILURE_STORAGE ->
+            "存储空间不足"
+        PackageInstaller.STATUS_FAILURE_CONFLICT ->
+            "与已安装版本签名或版本冲突"
+        PackageInstaller.STATUS_FAILURE_INCOMPATIBLE ->
+            "安装包与该设备不兼容"
+        PackageInstaller.STATUS_FAILURE_BLOCKED ->
+            "被系统或安全软件拦截"
+        PackageInstaller.STATUS_FAILURE_INVALID ->
+            "安装包无效或已损坏"
+        else ->
+            intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "未知错误"
     }
 
     /** 是否已允许本应用安装未知来源应用（安装前必须为 true，否则系统会拒绝） */
