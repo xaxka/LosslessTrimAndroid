@@ -35,6 +35,12 @@ object Probe {
     private const val KEYFRAME_PROBE_TIMEOUT_MS = 600_000L
 
     /**
+     * 切点邻域探测窗口半径（秒）：远大于常见 GOP（2~10s）。邻域内凑不齐
+     * 对齐所需的关键帧（超长 GOP）时退回全量扫描，语义不将就。
+     */
+    private const val KEYFRAME_WINDOW_SEC = 60.0
+
+    /**
      * 看门狗：会话开始执行后若超时未完成，FFmpegKit.cancel(sessionId) 中止
      * 会话使其尽快返回。串行执行（SessionBridge 执行锁）下单个会话挂死会
      * 阻塞其后所有探测/剪辑，看门狗是扫描不至永久卡住的保底。
@@ -241,6 +247,96 @@ object Probe {
         } catch (e: Exception) {
             emptyList()
         }
+    }
+
+    /**
+     * 切点邻域关键帧探测：用 -read_intervals 只读各切点前后 [KEYFRAME_WINDOW_SEC]
+     * 的 packet，代替整文件全量扫描（[probeKeyframes]）。GB 级 4K 长片全量扫描
+     * 要顺序读完整文件（每片数十秒），批量队列"每处理完一个文件干等半天"的
+     * 主因之一；定点读通常只触碰文件几 MB。
+     *
+     * 结果校验：每个有效切点的邻域内必须同时存在 ≤t 与 ≥t 的关键帧（切点贴着
+     * 0 或片长时只查存在侧），凑不齐视为超长 GOP 或 seek 失败，退回全量扫描，
+     * 保证 [com.xixka.losslesstrim.trim.TrimPlanner] 对齐结果与全量一致。
+     */
+    suspend fun probeKeyframesNear(
+        context: Context,
+        uri: Uri,
+        points: List<Double>,
+        durSec: Double,
+    ): List<Double> = withContext(Dispatchers.IO) {
+        val path = com.xixka.losslesstrim.util.StorageAccess
+            .accessibleFile(context, uri)?.absolutePath ?: return@withContext emptyList()
+        if (durSec <= 0 || points.isEmpty()) return@withContext emptyList()
+        try {
+            val clamped = points.map { it.coerceIn(0.0, durSec) }.distinct().sorted()
+            // 窗口按起点排序后合并重叠/相邻区间：两切点邻近时一次区间读掉
+            val raw = clamped.map {
+                (it - KEYFRAME_WINDOW_SEC).coerceAtLeast(0.0) to
+                        (it + KEYFRAME_WINDOW_SEC).coerceAtMost(durSec)
+            }.sortedBy { it.first }
+            val wins = ArrayList<Pair<Double, Double>>()
+            for (w in raw) {
+                val last = wins.lastOrNull()
+                if (last != null && w.first <= last.second + 0.5) {
+                    wins[wins.size - 1] = last.first to maxOf(last.second, w.second)
+                } else wins.add(w)
+            }
+            val intervals = wins.joinToString(",") {
+                String.format(java.util.Locale.US, "%.3f%%%.3f", it.first, it.second)
+            }
+            val spillDir = File(context.cacheDir, "probe-spill")
+            val kfs = ArrayList<Double>()
+            val ok = runProbeToDisk(
+                "-v error -select_streams v:0 -show_entries packet=pts_time,flags " +
+                        "-of csv=p=0 -read_intervals \"$intervals\" -i \"$path\"",
+                spillDir,
+            ) { reader ->
+                reader.forEachLine { line -> parseKeyframeLine(line, kfs) }
+            }
+            // 执行失败（容器不支持区间 seek 等）→ 全量兜底
+            if (!ok) return@withContext probeKeyframes(context, uri)
+            val sorted = kfs.distinct().sorted()
+            val valid = clamped.all { t ->
+                when {
+                    t <= 0.05 -> sorted.isNotEmpty()
+                    t >= durSec - 0.05 -> sorted.any { it <= t }
+                    else -> sorted.any { it <= t } && sorted.any { it >= t }
+                }
+            }
+            if (!valid) return@withContext probeKeyframes(context, uri)
+            sorted
+        } catch (e: Exception) {
+            probeKeyframes(context, uri)
+        }
+    }
+
+    /**
+     * 输出终检（轻量）：只解析容器级时长与流存在性——不逐流解参数。
+     * -show_streams 对 hev1 标记（参数集内嵌码流）的 HEVC 会去读码流包才能
+     * 组出流信息，GB 级输出上明显拖慢每个文件的收尾；此处只读头即可判定
+     * "产物可解析、时长正常、有流"。任一步不确信（超时/解析不出/时长异常）
+     * 即退回全量 [probeMediaPath]，判定语义与全量探测一致。
+     */
+    suspend fun verifyMedia(path: String): ProbeResult = withContext(Dispatchers.IO) {
+        val outcome = runProbe(
+            "-v error -show_entries format=duration:stream=index -of json -i \"$path\""
+        )
+        val fast = if (outcome.timedOut || !outcome.ok || outcome.output.isBlank()) {
+            null
+        } else {
+            try {
+                val root = JSONObject(outcome.output)
+                val dur = root.optJSONObject("format")?.optString("duration")?.toDoubleOrNull()
+                val streamCount = root.optJSONArray("streams")?.length() ?: 0
+                if (dur != null && dur > 0 && streamCount > 0) {
+                    ProbeResult(probeOk = true, durationSec = dur)
+                } else null
+            } catch (_: Exception) {
+                null
+            }
+        }
+        fast ?: probeMediaPath(path)
     }
 
     private fun parseMediaJson(json: String): ProbeResult {

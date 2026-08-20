@@ -202,11 +202,27 @@ class TrimService : Service() {
         val s = job.settings
         publishRunning(idx, total, entry.name, 0f, "")
 
-        // 1. 关键帧（有缓存则直接复用）
-        val keyframes = Probe.probeKeyframes(this, entry.docUri)
+        // 1. 逻辑计划先行：不可处理/剪完为空的文件直接跳过，不做任何扫描
+        val logical = TrimPlanner.logicalPlan(entry, s, job.override)
+        if (!logical.ok) {
+            return FileResult(entry, logical, Outcome.SKIPPED, entry.sizeBytes, reason = logical.skipReason)
+        }
 
-        // 2. 对齐后的计划
-        val plan = TrimPlanner.alignedPlan(entry, s, job.override, keyframes)
+        // 2. 关键帧对齐：只对"真要切"的文件探测，且只读切点邻域（-read_intervals
+        //    定点读几 MB）而非整文件全量扫描（GB 级 4K 片源每次整读数十秒，是
+        //    "每处理完一个文件干等半天"的主因）。全片保留的文件对齐无意义，
+        //    直接用逻辑计划（对齐 0/片长最多各缩一个 GOP，不值得为此读全片）
+        val dur = entry.probe.durationSec
+        val needTrim = logical.requestedStart > 0.001 || logical.requestedEnd < dur - 0.001
+        val plan = if (needTrim) {
+            val kfs = Probe.probeKeyframesNear(
+                this, entry.docUri,
+                listOf(logical.requestedStart, logical.requestedEnd), dur
+            )
+            TrimPlanner.alignedPlan(entry, s, job.override, kfs)
+        } else {
+            logical
+        }
         if (!plan.ok) {
             return FileResult(entry, plan, Outcome.SKIPPED, entry.sizeBytes, reason = plan.skipReason)
         }
@@ -276,7 +292,8 @@ class TrimService : Service() {
                 return FileResult(entry, plan, Outcome.FAILED, entry.sizeBytes, reason = extractError(session))
             }
             val newSize = outFile.length().coerceAtLeast(0)
-            val outProbe = Probe.probeMediaPath(outFile.absolutePath)
+            // 轻量终检：只读容器头（hev1 内嵌参数集的 HEVC 全量 -show_streams 会读码流包）
+            val outProbe = Probe.verifyMedia(outFile.absolutePath)
             if (newSize <= 0 || !outProbe.probeOk) {
                 outFile.delete()
                 return FileResult(
@@ -372,11 +389,11 @@ class TrimService : Service() {
             )
         }
 
-        // 终检一：最终文件字节数必须与 .part 一致；终检二：直路径 ffprobe 必须可解析
+        // 终检一：最终文件字节数必须与 .part 一致；终检二：轻量探测必须可解析
         // （防 moov 缺失等坏文件冒充成功——直路径下 faststart 可靠，此检查退化为兜底）
         val finalLen = finalFile.length().coerceAtLeast(0)
         val sizeBad = partLen > 0 && finalLen != partLen
-        val finalProbe = Probe.probeMediaPath(finalFile.absolutePath)
+        val finalProbe = Probe.verifyMedia(finalFile.absolutePath)
         if (sizeBad || !finalProbe.probeOk) {
             finalFile.delete()
             backupFile?.renameTo(origFile)       // 还原原片
