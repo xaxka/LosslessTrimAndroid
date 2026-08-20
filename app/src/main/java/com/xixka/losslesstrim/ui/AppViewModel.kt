@@ -199,8 +199,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     list.isEmpty() -> "该文件夹里没有找到视频文件"
                     else -> {
                         val bad = list.count { !it.probe.probeOk }
-                        if (bad > 0) "共 ${list.size} 个视频，其中 $bad 个不可处理"
+                        val base = if (bad > 0) "共 ${list.size} 个视频，其中 $bad 个不可处理"
                         else "共 ${list.size} 个视频"
+                        // 处理队列还在跑时目录正被改写（覆盖/改名/临时文件），本次
+                        // 扫描结果可能不完整，提示结束后重扫而不是让用户误判
+                        if (TrimController.running) "$base（处理进行中，结束后请重扫）" else base
                     }
                 }
             } catch (e: Exception) {

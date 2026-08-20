@@ -37,19 +37,14 @@ object Probe {
      * 修复并发扫描时正在运行的会话被挤出历史（history=2）导致输出被截断、
      * JSON 在半途突然结束（"End of input at character NNN"）的问题。
      * retain=false：探测输出立即消费，不驻留 doneLogs（防多份大输出积压）。
+     * 执行全程持有 SessionBridge 全局执行锁：并发会话的日志会互相串扰。
      */
-    private fun runProbe(cmd: String): Pair<Boolean, String> {
+    private suspend fun runProbe(cmd: String): Pair<Boolean, String> {
         SessionBridge.init()
         val session = FFprobeSession.create(FFmpegKitConfig.parseArguments(cmd))
-        SessionBridge.beginLogs(session.sessionId)
-        var output = ""
-        try {
-            FFmpegKitConfig.ffprobeExecute(session)
-        } finally {
-            output = SessionBridge.endLogs(session.sessionId, retain = false)
+        SessionBridge.withExecuteLock {
+            runProbeLocked(session)
         }
-        val rc = session.returnCode
-        return (rc != null && rc.isValueSuccess) to output
     }
 
     /**
@@ -59,35 +54,63 @@ object Probe {
      * StringBuilder + toString 双份拷贝瞬时峰值可达几十 MB，是 OOM 诱因；
      * 溢写后内存峰值只剩解析结果本身。磁盘不可用时退回内存模式（降级不失效）。
      * 返回 false = 探测失败或溢写损坏，调用方按失败处理。
+     * 执行与结束溢写都在全局执行锁内：会话结束前不会有别的会话日志串进来。
      */
-    private fun runProbeToDisk(cmd: String, spillDir: File, consume: (Reader) -> Unit): Boolean {
+    private suspend fun runProbeToDisk(cmd: String, spillDir: File, consume: (Reader) -> Unit): Boolean {
         SessionBridge.init()
         val session = FFprobeSession.create(FFmpegKitConfig.parseArguments(cmd))
-        val spill = SessionBridge.beginSpill(session.sessionId, spillDir)
-        if (spill == null) {
-            // 磁盘不可用（极端情况）：内存兜底，行为与旧实现一致
-            val (ok, output) = runProbe(cmd)
-            if (!ok) return false
-            consume(StringReader(output))
-            return true
+        var execOk = false
+        var spill: SessionBridge.Spill? = null
+        SessionBridge.withExecuteLock {
+            // begin/execute/end 全程持锁；磁盘不可用（极端情况）时锁内退回内存模式
+            val sp = SessionBridge.beginSpill(session.sessionId, spillDir)
+            if (sp == null) {
+                val (ok, output) = runProbeLocked(session)
+                if (ok) {
+                    try {
+                        consume(StringReader(output))
+                        execOk = true
+                    } catch (_: Exception) {
+                        execOk = false
+                    }
+                }
+                return@withExecuteLock
+            }
+            spill = sp
+            try {
+                FFmpegKitConfig.ffprobeExecute(session)
+                val rc = session.returnCode
+                // 先结束溢写（flush + close）再读，避免漏掉缓冲区尾部
+                SessionBridge.endSpill(session.sessionId)
+                execOk = rc != null && rc.isValueSuccess && !sp.failed
+            } catch (_: Exception) {
+                execOk = false
+            }
         }
-        var ok = false
+        // 读取/解析在锁外进行（可能耗时较久，不阻塞其他会话执行）
+        if (execOk && spill != null) {
+            try {
+                spill!!.file.bufferedReader().use { consume(it) }
+            } catch (_: Exception) {
+                execOk = false
+            }
+        }
+        SessionBridge.endSpill(session.sessionId)   // 幂等：已结束则 no-op
+        spill?.delete()
+        return execOk
+    }
+
+    /** [runProbe] 的已持锁变体：调用方必须已持有 SessionBridge 执行锁 */
+    private fun runProbeLocked(session: FFprobeSession): Pair<Boolean, String> {
+        SessionBridge.beginLogs(session.sessionId)
+        var output = ""
         try {
             FFmpegKitConfig.ffprobeExecute(session)
-            val rc = session.returnCode
-            // 先结束溢写（flush + close）再读，避免漏掉缓冲区尾部
-            SessionBridge.endSpill(session.sessionId)
-            if (rc != null && rc.isValueSuccess && !spill.failed) {
-                spill.file.bufferedReader().use { consume(it) }
-                ok = true
-            }
-        } catch (e: Exception) {
-            ok = false
         } finally {
-            SessionBridge.endSpill(session.sessionId)   // 幂等：已结束则 no-op
-            spill.delete()
+            output = SessionBridge.endLogs(session.sessionId, retain = false)
         }
-        return ok
+        val rc = session.returnCode
+        return (rc != null && rc.isValueSuccess) to output
     }
 
     suspend fun probeMedia(context: Context, uri: Uri): ProbeResult = withContext(Dispatchers.IO) {

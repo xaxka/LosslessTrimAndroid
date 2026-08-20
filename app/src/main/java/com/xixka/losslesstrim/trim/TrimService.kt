@@ -447,31 +447,36 @@ class TrimService : Service() {
      * 日志与进度统计均经 SessionBridge 全局回调采集/路由：ffmpeg 运行期间其他
      * ffprobe 会话可能把它挤出 ffmpeg-kit 的会话历史（history=2），会话级回调
      * 会因此丢失（进度冻结、错误日志残缺），全局回调不受影响。
+     * 执行全程持有 SessionBridge 全局执行锁（至会话完成回调）：并发执行多个
+     * 会话时日志的会话归属不可靠——扫描 ffprobe 与本 ffmpeg 重叠时，本会话
+     * stderr 行会串进 ffprobe 的 JSON 输出（"不可处理"误判），反之亦然。
      */
     private suspend fun runFfmpeg(
         cmd: String,
         onStat: (timeMs: Double, speed: Double) -> Unit,
-    ): FFmpegSession? = suspendCancellableCoroutine { cont ->
-        SessionBridge.init()
-        val session = FFmpegSession.create(
-            FFmpegKitConfig.parseArguments(cmd),
-            { s ->
-                SessionBridge.endLogs(s.sessionId)
-                SessionBridge.endStats(s.sessionId)
-                if (cont.isActive) cont.resume(s)
-            },
-            null, // 日志经 SessionBridge 采集
-            null, // 进度经 SessionBridge 路由
-        )
-        SessionBridge.beginLogs(session.sessionId)
-        SessionBridge.beginStats(session.sessionId) { timeMs, speed -> onStat(timeMs, speed) }
-        FFmpegKitConfig.asyncFFmpegExecute(session)
-        cont.invokeOnCancellation {
-            try {
-                FFmpegKit.cancel(session.sessionId)
-            } catch (_: Exception) {
+    ): FFmpegSession? = SessionBridge.withExecuteLock {
+        suspendCancellableCoroutine { cont ->
+            SessionBridge.init()
+            val session = FFmpegSession.create(
+                FFmpegKitConfig.parseArguments(cmd),
+                { s ->
+                    SessionBridge.endLogs(s.sessionId)
+                    SessionBridge.endStats(s.sessionId)
+                    if (cont.isActive) cont.resume(s)
+                },
+                null, // 日志经 SessionBridge 采集
+                null, // 进度经 SessionBridge 路由
+            )
+            SessionBridge.beginLogs(session.sessionId)
+            SessionBridge.beginStats(session.sessionId) { timeMs, speed -> onStat(timeMs, speed) }
+            FFmpegKitConfig.asyncFFmpegExecute(session)
+            cont.invokeOnCancellation {
+                try {
+                    FFmpegKit.cancel(session.sessionId)
+                } catch (_: Exception) {
+                }
+                SessionBridge.cleanup(session.sessionId)
             }
-            SessionBridge.cleanup(session.sessionId)
         }
     }
 }

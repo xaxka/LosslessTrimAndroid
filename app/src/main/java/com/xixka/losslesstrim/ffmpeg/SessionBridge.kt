@@ -2,6 +2,8 @@ package com.xixka.losslesstrim.ffmpeg
 
 import com.antonkarpenko.ffmpegkit.FFmpegKitConfig
 import com.antonkarpenko.ffmpegkit.Statistics
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.BufferedWriter
 import java.io.File
 import java.io.FileWriter
@@ -14,9 +16,11 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * 背景：ffmpeg-kit 的 Java 侧日志/统计回调先按 sessionId 从“会话历史”里查会话，
  * 查不到就把整条消息**静默丢弃**。本应用为防大输出（关键帧 CSV 可达几十 MB）驻留
- * 内存导致 OOM，把会话历史压到了 2 条；而扫描阶段是 4 路 ffprobe 并发，正在运行的
- * 会话随时可能被新会话挤出历史——表现为 ffprobe 输出被拦腰截断（如 JSON 在第
- * 822 字符处突然结束）、剪辑进度回调冻结、失败原因日志残缺。
+ * 内存导致 OOM，把会话历史压到了 2 条；曾经扫描阶段 4 路 ffprobe 并发、扫描还会
+ * 与剪辑队列的 ffmpeg 会话重叠——正在运行的会话随时可能被新会话挤出历史，
+ * 表现为 ffprobe 输出被拦腰截断（如 JSON 在第 822 字符处突然结束）、剪辑进度
+ * 回调冻结、失败原因日志残缺。因此所有会话输出一律经本桥采集（见下），
+ * 且所有 ffmpeg/ffprobe 执行经全局执行锁串行（见 executeMutex）。
  *
  * 方案：注册**全局** Log/Statistics 回调（它们的调用不经过会话历史查找，一定会触发），
  * 按 sessionId 路由到进程内缓冲。只有显式 begin 过的会话才会被记录，其余会话
@@ -61,6 +65,25 @@ object SessionBridge {
 
     /** 进度统计路由：sessionId → 处理器 */
     private val statHandlers = ConcurrentHashMap<Long, (Double, Double) -> Unit>()
+
+    /**
+     * ffmpeg-kit 全局执行互斥锁。
+     *
+     * 实测：多个会话**并发执行**时，库对日志的会话归属不可靠——并发扫描或
+     * 扫描与剪辑队列重叠时，ffmpeg 会话的 stderr 行（如 "Stream #0:1[0x2]"，
+     * ffmpeg 6.x+ 输入转储风格）会被写进并发 ffprobe 会话的输出缓冲，JSON
+     * 拦腰混入外来行 → "Expected ':' after Stream ..." 解析失败、文件被判
+     * "不可处理"。这是会话历史挤出（已修）之外的另一个并发缺陷：路由键
+     * sessionId 本身在并发执行下就不可信。
+     *
+     * 因此所有 ffmpeg/ffprobe 执行（含 begin/execute/end 全程）必须持有此锁：
+     * 进程内任一时刻至多一个会话在执行，日志与进度统计的归属就不会串。
+     */
+    private val executeMutex = Mutex()
+
+    /** 串行执行一个 ffmpeg/ffprobe 会话；block 返回即会话结束、锁释放 */
+    suspend fun <T> withExecuteLock(block: suspend () -> T): T =
+        executeMutex.withLock { block() }
 
     @Volatile
     private var initialized = false

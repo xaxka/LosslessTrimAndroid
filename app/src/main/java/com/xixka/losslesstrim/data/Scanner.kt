@@ -8,8 +8,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
 /** 扫描结果：视频列表 + 残留中间文件（闪退遗留的备份/临时文件，供恢复提示） */
@@ -34,21 +32,20 @@ object Scanner {
             collectFiles(root, files, orphans)
             if (files.isEmpty()) return@withContext ScanResult(emptyList(), orphans)
 
-            val sem = Semaphore(4)
+            // ffprobe 探测已在 SessionBridge 执行层全局串行（并发会话的日志会互相
+            // 串扰，见 SessionBridge.executeMutex）；async 结构保留仅为聚合结果
             val entries = coroutineScope {
                 files.map { (file, folder) ->
                     async {
-                        sem.withPermit {
-                            val probe = Probe.probeMedia(context, file.uri)
-                            VideoEntry(
-                                treeUri = treeUri,
-                                folderUri = folder.uri,
-                                docUri = file.uri,
-                                name = file.name ?: file.uri.toString(),
-                                sizeBytes = if (file.length() > 0) file.length() else 0L,
-                                probe = probe,
-                            )
-                        }
+                        val probe = Probe.probeMedia(context, file.uri)
+                        VideoEntry(
+                            treeUri = treeUri,
+                            folderUri = folder.uri,
+                            docUri = file.uri,
+                            name = file.name ?: file.uri.toString(),
+                            sizeBytes = if (file.length() > 0) file.length() else 0L,
+                            probe = probe,
+                        )
                     }
                 }.awaitAll().sortedBy { it.name.lowercase() }
             }
