@@ -63,16 +63,17 @@ class TrimService : Service() {
                 }
                 if (!TrimController.running) stopSelf()
             }
-            ACTION_START -> {
-                startAsForeground()
-                if (!TrimController.running) {
-                    serviceScope.launch { runQueue() }
-                }
-            }
             else -> {
                 startAsForeground()
-                if (!TrimController.running) {
+                // 认领启动请求：running 已被 start() 提前占位置 true（防重入），
+                // 不能再用 !running 判断，否则 runQueue 永远不会被启动
+                if (TrimController.takeStartRequest()) {
                     serviceScope.launch { runQueue() }
+                } else if (!TrimController.running) {
+                    // 防御：无待启动请求且无队列在跑（重复投递/启动失败回滚后的
+                    // 残留投递），撤前台通知直接退出，避免"准备中…"僵尸通知
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
                 }
             }
         }

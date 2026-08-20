@@ -42,6 +42,9 @@ object TrimController {
     @Volatile var running: Boolean = false
 
     @Volatile private var pendingJobs: List<TrimJob> = emptyList()
+
+    /** 待启动请求：start() 占位后置位，Service 端首个 onStartCommand 认领（原子取走） */
+    @Volatile private var startRequested = false
     private val lock = Any()
 
     /** 返回 false = 已有队列在运行或服务启动失败（调用方据此提示用户，而不是静默丢弃） */
@@ -54,6 +57,10 @@ object TrimController {
             // IPC 延迟期间二次 start() 会通过检查并覆盖 pendingJobs，导致两条队列
             // 并发执行（两个 ffmpeg 同时写同一个 .part）或首批任务被静默丢弃
             running = true
+            // 与占位分离的启动信号：Service 不能再用 !running 判断是否启动队列——
+            // running 已被上面提前置 true，否则 runQueue 永远不会启动，服务挂着
+            // "准备中…"通知空转，处理页一直停在"队列未在运行"
+            startRequested = true
         }
         val intent = Intent(context, TrimService::class.java).setAction(TrimService.ACTION_START)
         return try {
@@ -62,9 +69,22 @@ object TrimController {
         } catch (e: Exception) {
             synchronized(lock) {
                 running = false
+                startRequested = false
                 pendingJobs = emptyList()
             }
             false
+        }
+    }
+
+    /**
+     * Service 端认领启动请求：仅 start() 成功后的首个 onStartCommand 返回 true
+     * （重复投递/队列已在跑时返回 false，不会启动第二条队列）。
+     */
+    fun takeStartRequest(): Boolean {
+        synchronized(lock) {
+            val r = startRequested
+            startRequested = false
+            return r
         }
     }
 
