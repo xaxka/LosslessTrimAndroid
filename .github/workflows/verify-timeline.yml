@@ -1,0 +1,180 @@
+# 临时验证 workflow：输出时间轴修复（docs/output-timeline.md）
+# 验证通过后删除本文件（单元测试 TrimCommandTest.kt 保留）。
+name: Verify output timeline fix
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests (seekArgs / avoidNegativeTsArgs / subtitleClampBsf / hasKeptSubtitle)
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest --no-daemon --stacktrace
+
+      # ---- E2E：时间轴修复测试矩阵（与本地 verify-timeline.sh 同款）----
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - name: E2E timeline matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          W="$(mktemp -d)"
+          cd "$W"
+          ffmpeg -version | head -1
+
+          # ---- 样例 A：bf=8 MKV + AAC(priming→start_time=-0.023) + 末尾长 cue 字幕 ----
+          cat > subs.srt <<'EOF'
+          1
+          00:00:05,000 --> 00:00:06,000
+          EarlyCue
+
+          2
+          00:00:32,000 --> 00:00:34,000
+          At32s
+
+          3
+          00:00:50,000 --> 00:00:59,000
+          NearEnd
+
+          4
+          00:00:59,500 --> 00:01:10,000
+          LastCueLongDur
+          EOF
+
+          ffmpeg -hide_banner -loglevel error -y \
+            -f lavfi -i "testsrc2=size=640x360:rate=25:duration=60.1" \
+            -f lavfi -i "sine=frequency=440:r=44100:duration=60.1" \
+            -i subs.srt -map 0:v -map 1:a -map 2:s \
+            -c:v libx264 -preset ultrafast -bf 8 -g 50 -keyint_min 50 -sc_threshold 0 \
+            -c:a aac -c:s srt src.mkv
+
+          # ---- 样例 B：音频超前视频 0.8s（itsoffset，真实片源形态）+ 跨终点长 cue ----
+          cat > subs2.srt <<'EOF'
+          1
+          00:00:05,000 --> 00:00:06,000
+          EarlyCue
+
+          2
+          00:00:28,000 --> 00:00:36,000
+          StraddleEnd
+          EOF
+
+          ffmpeg -hide_banner -loglevel error -y \
+            -f lavfi -i "testsrc2=size=640x360:rate=25:duration=60.1" \
+            -itsoffset -0.8 -f lavfi -i "sine=frequency=440:r=44100:duration=60.1" \
+            -i subs2.srt -map 0:v -map 1:a -map 2:s \
+            -c:v libx264 -preset ultrafast -bf 8 -g 50 -keyint_min 50 -sc_threshold 0 \
+            -c:a aac -c:s srt lead.mkv
+          echo "src.mkv start_time=$(ffprobe -v error -show_entries format=start_time -of csv=p=0 src.mkv) | lead.mkv start_time=$(ffprobe -v error -show_entries format=start_time -of csv=p=0 lead.mkv)"
+
+          measure() { # $1=file → "dur st v0 vend a0 aCount send over"
+          python3 - "$1" <<'PY'
+          import subprocess, sys
+          f = sys.argv[1]
+          def p(a): return subprocess.run(['ffprobe','-v','error']+a,capture_output=True,text=True).stdout.strip()
+          dur = float(p(['-show_entries','format=duration','-of','csv=p=0',f]))
+          st = float(p(['-show_entries','format=start_time','-of','csv=p=0',f]))
+          def pk(sel):
+              return [l.split(',') for l in p(['-select_streams',sel,'-show_entries','packet=pts_time,duration_time','-of','csv=p=0',f]).splitlines() if l]
+          v, a, s = pk('v:0'), pk('a:0'), pk('s:0')
+          v0=float(v[0][0]) if v else -1.0
+          vend=float(v[-1][0])+float(v[-1][1]) if v else -1.0
+          a0=float(a[0][0]) if a else -1.0
+          send=float(s[-1][0])+float(s[-1][1]) if s else -1.0
+          print(f"{dur:.3f} {st:.3f} {v0:.3f} {vend:.3f} {a0:.3f} {len(a)} {send:.3f} {dur-vend:.3f}")
+          PY
+          }
+
+          ST="$(ffprobe -v error -show_entries format=start_time -of csv=p=0 src.mkv)"
+          KF="$(ffprobe -v error -select_streams v:0 -show_entries packet=pts_time,flags -of csv=p=0 src.mkv \
+            | python3 -c "
+          import sys
+          for line in sys.stdin.read().splitlines():
+              p = line.split(',')
+              if len(p) >= 2 and 'K' in p[1] and 29.9 <= float(p[0]) <= 30.1:
+                  print(p[0]); break
+          ")"
+          [ -n "$KF" ] || { echo "FATAL: KF not found"; exit 1; }
+          SS="$(python3 -c "
+          st = float('$ST') if '$ST' not in ('N/A','') else 0.0
+          print(f'{$KF + 0.131 + max(0.0,-st):.3f}')")"
+          T="$(python3 -c "
+          st = float('$ST') if '$ST' not in ('N/A','') else 0.0
+          print(f'{60.1 - $KF - 0.131 - max(0.0,-st):.3f}')")"
+          CLAMP="setts=duration=if(gte(DURATION\\,0)\\,max(min(DURATION\\,($T/TB)-TS)\\,0)\\,0)"
+          echo "sample A cut: ss=$SS t=$T"
+
+          echo; echo "== T1 旧命令·中段剪（应复现结尾超播 >5s）:"
+          ffmpeg -hide_banner -loglevel error -y -ss "$SS" -noaccurate_seek -i src.mkv \
+            -t "$T" -map 0:0 -map 0:1 -map 0:2 -c copy -map_metadata 0 \
+            -avoid_negative_ts make_zero -f matroska t1.mkv
+          read -r DUR STT V0 VEND A0 ACNT SEND OVER <<< "$(measure t1.mkv)"
+          echo "  dur=$DUR st=$STT v0=$V0 vend=$VEND a0=$A0 aN=$ACNT sub_end=$SEND 尾超=$OVER"
+          python3 -c "exit(0 if $OVER > 5 else 1)" || { echo "T1 FAIL: 超播未复现"; exit 1; }
+          echo "  T1 PASS（复现确认）"
+
+          echo; echo "== T2 新命令·中段剪（+字幕钳制 → 超播 <0.5s、起点≈0）:"
+          ffmpeg -hide_banner -loglevel error -y -ss "$SS" -noaccurate_seek -i src.mkv \
+            -t "$T" -map 0:0 -map 0:1 -map 0:2 -c copy -map_metadata 0 \
+            -avoid_negative_ts make_zero -bsf:s "$CLAMP" -f matroska t2.mkv
+          read -r DUR STT V0 VEND A0 ACNT SEND OVER <<< "$(measure t2.mkv)"
+          echo "  dur=$DUR st=$STT v0=$V0 vend=$VEND a0=$A0 aN=$ACNT sub_end=$SEND 尾超=$OVER"
+          python3 -c "exit(0 if $OVER < 0.5 and $SEND < $DUR + 0.5 and abs($STT) < 0.5 else 1)" \
+            || { echo "T2 FAIL"; exit 1; }
+          echo "  T2 PASS（超播消除、起点归零）"
+
+          TT="30.000"
+          CLAMP2="setts=duration=if(gte(DURATION\\,0)\\,max(min(DURATION\\,($TT/TB)-TS)\\,0)\\,0)"
+
+          echo; echo "== T3 旧命令·片头剪（-ss 0.000 + make_zero，应复现头部音频丢失 + 超播）:"
+          ffmpeg -hide_banner -loglevel error -y -ss 0.000 -noaccurate_seek -i lead.mkv \
+            -t "$TT" -map 0:0 -map 0:1 -map 0:2 -c copy -map_metadata 0 \
+            -avoid_negative_ts make_zero -f matroska t3.mkv
+          read -r DUR3 STT3 V03 VEND3 A03 ACNT3 SEND3 OVER3 <<< "$(measure t3.mkv)"
+          echo "  dur=$DUR3 st=$STT3 v0=$V03 vend=$VEND3 a0=$A03 aN=$ACNT3 sub_end=$SEND3 尾超=$OVER3"
+
+          echo; echo "== T4 新命令·片头剪（不传 -ss/make_zero + 钳制 → 音频完整、起点≈0、无超播）:"
+          ffmpeg -hide_banner -loglevel error -y -i lead.mkv \
+            -t "$TT" -map 0:0 -map 0:1 -map 0:2 -c copy -map_metadata 0 \
+            -bsf:s "$CLAMP2" -f matroska t4.mkv
+          read -r DUR4 STT4 V04 VEND4 A04 ACNT4 SEND4 OVER4 <<< "$(measure t4.mkv)"
+          echo "  dur=$DUR4 st=$STT4 v0=$V04 vend=$VEND4 a0=$A04 aN=$ACNT4 sub_end=$SEND4 尾超=$OVER4"
+
+          python3 - "$ACNT3" "$V03" "$SEND3" "$DUR4" "$STT4" "$A04" "$ACNT4" "$OVER4" <<'PY'
+          import sys
+          n3, v03, s3, d4, st4, a04, n4, o4 = map(float, sys.argv[1:9])
+          ok = True
+          def chk(cond, msg):
+              global ok
+              if not cond:
+                  print(f"  T3/T4 FAIL: {msg}")
+                  ok = False
+          chk(n3 <= n4 - 20, f"T3 音频丢失未复现 (aN t3={int(n3)} vs t4={int(n4)})")
+          chk(v03 < 0.3, f"T3 内容丢失未复现 (v0={v03}，应被拉前到 ≈0.08)")
+          chk(s3 > 34.0, f"T3 片头剪超播未复现 (sub_end={s3})")
+          chk(d4 > 29.95, f"T4 时长异常 (dur={d4})")
+          chk(abs(st4) < 0.05, f"T4 start_time 未归零 (st={st4})")
+          chk(a04 < 0.05, f"T4 头部音频缺失 (a0={a04})")
+          chk(o4 < 0.5, f"T4 结尾超播 (尾超={o4})")
+          sys.exit(0 if ok else 1)
+          PY
+          echo "  T3 PASS（复现确认）/ T4 PASS（修复生效）"
+          echo "E2E PASSED"

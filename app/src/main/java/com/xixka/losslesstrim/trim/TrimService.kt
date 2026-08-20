@@ -92,6 +92,61 @@ class TrimService : Service() {
             val st = probe.startTimeSec ?: 0.0
             return SEEK_FUDGE_SEC + (-st).coerceAtLeast(0.0)
         }
+
+        /**
+         * 输入侧 seek 参数（" -ss X -noaccurate_seek"）；片头剪切（ss≈0）返回空串——
+         * **不传 -ss**（LosslessCut 同款策略：isCuttingStart 仅 cutFrom>0 才发 -ss）。
+         *
+         * 根因：-ss 0 时 ffmpeg 的 seek 目标 = 0 + start_time(常为负) − 3/23(B帧
+         * 启发修正) < 0，落在视频索引首条目**之前**，matroska 定位失败后从
+         * find_stream_info 预读位置续读并进入 skip_to_keyframe，把视频首个关键帧
+         * **之前**的音频包整段丢弃。音频与视频起点齐平的片源无感（只丢 priming
+         * 零头），但音频超前视频的片源（AAC priming/封装交错间隙，实测复现样例
+         * 超前 0.8s）开头 ~0.72s 静音且时长同缩。不传 -ss 则从文件头顺序解复用，
+         * 无此丢失。详见 docs/output-timeline.md。
+         */
+        fun seekArgs(ss: Double): String =
+            if (ss > 0.001) " -ss ${Formats.secs3(ss)} -noaccurate_seek" else ""
+
+        /**
+         * 输出侧时间戳归零参数；片头剪切（ss≈0，无 -ss）返回空串，即用 ffmpeg
+         * 默认的 avoid_negative_ts=auto（LosslessCut 同款门控：仅 cuttingStart &&
+         * ssBeforeInput 才传）。
+         *
+         * 实测（音频超前 0.8s 样例片头剪）：make_zero 会把首包 DTS 钉到 0，但
+         * matroska 封装下结果首包 pts=-0.023 为负（make_zero 与封装器各自的位移
+         * 打架）；auto 则干净输出 start_time=0.000。LosslessCut 注释另指出
+         * "no -ss 时传 make_zero 会让部分视频在 QuickLook 首帧黑屏"。
+         *
+         * 中段剪（有 -ss）保持 make_zero：seek 后首包时间戳为源片中段绝对值
+         * （如 30.0s），不显式归零成片 start_time=30s，播放器时间轴直接从
+         * 30:00 起跳。
+         */
+        fun avoidNegativeTsArgs(ss: Double): String =
+            if (ss > 0.001) " -avoid_negative_ts make_zero" else ""
+
+        /**
+         * 字幕包时长钳制 bsf（修复"时间轴结束还在不停播放"）：把每个字幕包的
+         * duration 压到剪辑终点内 `max(min(DURATION, T-TS), 0)`（T 为 -t 值）。
+         *
+         * 症状：末尾长字幕 cue（如 59.5→70.0s）整包保留且 duration 原样写出，
+         * 容器 Duration 被字幕末端撑大（实测 30s 成片显示 40s），播放器在画面
+         * 结束后继续"播放"黑屏近 10s。音频/视频包 duration 只有 ~20-40ms，溢出
+         * 可忽略，钳字幕即够。
+         *
+         * 表达式变量为 setts bsf 内置：TS/DURATION 是**当前流时基刻度**（非秒），
+         * TB 为时基（秒/刻度），故 T 写作 (T秒/TB)；`\\,` 转义 bsf 序列里的逗号。
+         * `if(gte(DURATION,0),…,0)` 防护无 duration 的字幕包（如部分 PGS 轨）：
+         * DURATION 为 NOPTS 时不钳制写 0。不用 -shortest：短音轨片源会把视频
+         * 硬截到音轨末端（LosslessCut 也因此只把它做成默认关闭的实验开关）。
+         */
+        fun subtitleClampBsf(durSec: Double): String =
+            "setts=duration=if(gte(DURATION\\,0)\\,max(min(DURATION\\," +
+                "(${Formats.secs3(durSec)}/TB)-TS)\\,0)\\,0)"
+
+        /** 保留轨道中是否含字幕流（决定是否追加字幕钳制 bsf） */
+        fun hasKeptSubtitle(probe: ProbeResult, kept: List<Int>): Boolean =
+            probe.streams.any { it.isSubtitle && it.index in kept }
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -522,16 +577,23 @@ class TrimService : Service() {
         entry: VideoEntry,
     ): String {
         // -ss 补偿见 [seekFudgeSec]；-t 锚定在 -ss 值上（停止条件 pts ≥ ss+t），
-        // 须同步减去同量，终点才能仍落在 actualEnd。
+        // 须同步减去同量，终点才能仍落在 actualEnd。片头剪切不传 -ss（见
+        // [seekArgs]）、不传 make_zero（见 [avoidNegativeTsArgs]）；字幕时长
+        // 钳制见 [subtitleClampBsf]。
         val fudge = seekFudgeSec(plan.actualStart, entry.probe)
         val ss = plan.actualStart + fudge
         val dur = (plan.actualEnd - ss).coerceAtLeast(0.001)
         val sb = StringBuilder()
-        sb.append("-hide_banner -y -ss ").append(Formats.secs3(ss))
-        sb.append(" -noaccurate_seek -i \"").append(inParam).append("\"")
+        sb.append("-hide_banner -y")
+        sb.append(seekArgs(ss))
+        sb.append(" -i \"").append(inParam).append("\"")
         sb.append(" -t ").append(Formats.secs3(dur))
         for (i in kept) sb.append(" -map 0:").append(i)
-        sb.append(" -c copy -map_metadata 0 -avoid_negative_ts make_zero")
+        sb.append(" -c copy -map_metadata 0")
+        sb.append(avoidNegativeTsArgs(ss))
+        if (hasKeptSubtitle(entry.probe, kept)) {
+            sb.append(" -bsf:s ").append(subtitleClampBsf(dur))
+        }
         if (target.muxer == "mp4") sb.append(" -movflags +faststart")
         sb.append(" -f ").append(target.muxer)
         sb.append(" \"").append(outParam).append("\"")
