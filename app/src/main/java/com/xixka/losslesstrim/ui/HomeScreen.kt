@@ -30,6 +30,7 @@ import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.CardDefaults
@@ -73,6 +74,7 @@ fun HomeScreen(
     val settings by vm.settings.collectAsState()
     val statuses by vm.statuses.collectAsState()
     val scanning by vm.scanning.collectAsState()
+    val scanProgress by vm.scanProgress.collectAsState()
     val scanMsg by vm.scanMsg.collectAsState()
     val orphans by vm.orphans.collectAsState()
     val processable by vm.processableCount.collectAsState()
@@ -271,23 +273,47 @@ fun HomeScreen(
                     )
                 }
                 if (scanning) {
-                    Row(
+                    // 串行探测下大文件夹扫描要 1~3 分钟：显示"第 X/N 个 + 当前文件名
+                    // + 进度条"，避免只有转圈被误认为卡死
+                    val p = scanProgress
+                    Column(
                         Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        CircularProgressIndicator(
-                            Modifier.size(20.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                        Spacer(Modifier.padding(6.dp))
-                        Text(
-                            "正在解析视频…",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = BlExt.textSecondary,
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(
+                                Modifier.size(20.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            Spacer(Modifier.padding(6.dp))
+                            Text(
+                                if (p != null && p.total > 0) {
+                                    "正在解析视频 ${p.parsed + 1}/${p.total}…"
+                                } else {
+                                    "正在解析视频…"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = BlExt.textSecondary,
+                            )
+                        }
+                        if (p != null && p.total > 0) {
+                            Text(
+                                p.current,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = BlExt.textSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            LinearProgressIndicator(
+                                progress = { (p.parsed + 1f) / p.total },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 4.dp),
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
                     }
                 }
                 OutlinedCard(

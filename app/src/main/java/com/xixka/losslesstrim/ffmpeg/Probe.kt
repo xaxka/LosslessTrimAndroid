@@ -2,6 +2,8 @@ package com.xixka.losslesstrim.ffmpeg
 
 import android.content.Context
 import android.net.Uri
+import com.antonkarpenko.ffmpegkit.AbstractSession
+import com.antonkarpenko.ffmpegkit.FFmpegKit
 import com.antonkarpenko.ffmpegkit.FFmpegKitConfig
 import com.antonkarpenko.ffmpegkit.FFprobeSession
 import com.xixka.losslesstrim.data.ProbeResult
@@ -13,6 +15,9 @@ import java.io.File
 import java.io.Reader
 import java.io.StringReader
 import java.util.Collections
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * ffprobe 封装：媒体信息（流列表）+ 关键帧位置探测。
@@ -20,8 +25,23 @@ import java.util.Collections
  */
 object Probe {
 
-    /** 关键帧缓存上限（视频条数）：防止长时间使用 / 换多个目录后无限增长 */
+    /** 关键帧缓存上限（视频条目数）：防止长时间使用 / 换多个目录后无限增长 */
     private const val KEYFRAME_CACHE_MAX = 64
+
+    /** 单次媒体信息探测超时：正常远小于 5s，超时（病态 SAF 慢读/损坏文件）按失败处理防挂死 */
+    private const val MEDIA_PROBE_TIMEOUT_MS = 45_000L
+
+    /** 关键帧全量 packet 扫描超时：长视频合法耗时数分钟，上限放宽到 10 分钟 */
+    private const val KEYFRAME_PROBE_TIMEOUT_MS = 600_000L
+
+    /**
+     * 看门狗：会话开始执行后若超时未完成，FFmpegKit.cancel(sessionId) 中止
+     * 会话使其尽快返回。串行执行（SessionBridge 执行锁）下单个会话挂死会
+     * 阻塞其后所有探测/剪辑，看门狗是扫描不至永久卡住的保底。
+     */
+    private val watchdog = Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "probe-watchdog").apply { isDaemon = true }
+    }
 
     /** 关键帧缓存（uri string → 升序关键帧时间列表），进程内复用，LRU 淘汰 */
     private val keyframeCache = Collections.synchronizedMap(
@@ -31,6 +51,9 @@ object Probe {
         }
     )
 
+    /** 单次 ffprobe 执行结果 */
+    private class ExecOutcome(val ok: Boolean, val output: String, val timedOut: Boolean)
+
     /**
      * 同步执行 ffprobe 并取回**完整**输出（内存模式，适合小输出）。
      * 输出经 SessionBridge 的全局回调采集，不依赖 ffmpeg-kit 会话历史：
@@ -38,8 +61,9 @@ object Probe {
      * JSON 在半途突然结束（"End of input at character NNN"）的问题。
      * retain=false：探测输出立即消费，不驻留 doneLogs（防多份大输出积压）。
      * 执行全程持有 SessionBridge 全局执行锁：并发会话的日志会互相串扰。
+     * 带超时看门狗：超时取消会话按失败返回，防止单文件挂死阻塞整个扫描。
      */
-    private suspend fun runProbe(cmd: String): Pair<Boolean, String> {
+    private suspend fun runProbe(cmd: String): ExecOutcome {
         SessionBridge.init()
         val session = FFprobeSession.create(FFmpegKitConfig.parseArguments(cmd))
         return SessionBridge.withExecuteLock {
@@ -53,7 +77,7 @@ object Probe {
      * 磁盘防护：packet 级 CSV 对长视频（数小时、多轨）可达几十 MB，旧实现
      * StringBuilder + toString 双份拷贝瞬时峰值可达几十 MB，是 OOM 诱因；
      * 溢写后内存峰值只剩解析结果本身。磁盘不可用时退回内存模式（降级不失效）。
-     * 返回 false = 探测失败或溢写损坏，调用方按失败处理。
+     * 返回 false = 探测失败（含超时）或溢写损坏，调用方按失败处理。
      * 执行与结束溢写都在全局执行锁内：会话结束前不会有别的会话日志串进来。
      */
     private suspend fun runProbeToDisk(cmd: String, spillDir: File, consume: (Reader) -> Unit): Boolean {
@@ -65,10 +89,10 @@ object Probe {
             // begin/execute/end 全程持锁；磁盘不可用（极端情况）时锁内退回内存模式
             val sp = SessionBridge.beginSpill(session.sessionId, spillDir)
             if (sp == null) {
-                val (ok, output) = runProbeLocked(session)
-                if (ok) {
+                val outcome = runProbeLocked(session)
+                if (outcome.ok) {
                     try {
-                        consume(StringReader(output))
+                        consume(StringReader(outcome.output))
                         execOk = true
                     } catch (_: Exception) {
                         execOk = false
@@ -78,7 +102,9 @@ object Probe {
             }
             spill = sp
             try {
-                FFmpegKitConfig.ffprobeExecute(session)
+                executeWithWatchdog(session, KEYFRAME_PROBE_TIMEOUT_MS) {
+                    FFmpegKitConfig.ffprobeExecute(session)
+                }
                 val rc = session.returnCode
                 // 先结束溢写（flush + close）再读，避免漏掉缓冲区尾部
                 SessionBridge.endSpill(session.sessionId)
@@ -101,31 +127,66 @@ object Probe {
     }
 
     /** [runProbe] 的已持锁变体：调用方必须已持有 SessionBridge 执行锁 */
-    private fun runProbeLocked(session: FFprobeSession): Pair<Boolean, String> {
+    private fun runProbeLocked(session: FFprobeSession): ExecOutcome {
         SessionBridge.beginLogs(session.sessionId)
         var output = ""
+        var timedOut = false
         try {
-            FFmpegKitConfig.ffprobeExecute(session)
+            timedOut = executeWithWatchdog(session, MEDIA_PROBE_TIMEOUT_MS) {
+                FFmpegKitConfig.ffprobeExecute(session)
+            }
         } finally {
             output = SessionBridge.endLogs(session.sessionId, retain = false)
         }
         val rc = session.returnCode
-        return (rc != null && rc.isValueSuccess) to output
+        return ExecOutcome(rc != null && rc.isValueSuccess, output, timedOut)
+    }
+
+    /** 执行 [execute]，超时未完成则取消会话使其尽快返回；返回是否发生超时 */
+    private fun executeWithWatchdog(
+        session: AbstractSession,
+        timeoutMs: Long,
+        execute: () -> Unit,
+    ): Boolean {
+        val finished = AtomicBoolean(false)
+        val timedOut = AtomicBoolean(false)
+        val future = watchdog.schedule({
+            if (!finished.get()) {
+                timedOut.set(true)
+                try {
+                    FFmpegKit.cancel(session.sessionId)
+                } catch (_: Exception) {
+                }
+            }
+        }, timeoutMs, TimeUnit.MILLISECONDS)
+        try {
+            execute()
+        } finally {
+            finished.set(true)
+            future.cancel(false)
+        }
+        return timedOut.get()
     }
 
     suspend fun probeMedia(context: Context, uri: Uri): ProbeResult = withContext(Dispatchers.IO) {
         try {
             val input = FFmpegKitConfig.getSafParameterForRead(context, uri)
-            val (ok, output) = runProbe(
+            val outcome = runProbe(
                 "-v error -show_streams -show_format -of json -i \"$input\""
             )
-            if (!ok || output.isBlank()) {
-                return@withContext ProbeResult(
+            when {
+                outcome.timedOut -> ProbeResult(
                     probeOk = false,
-                    error = tailOf(output.ifBlank { "ffprobe 无输出" }, 200)
+                    error = "探测超时（读取过慢或文件损坏），可重试"
                 )
+
+                !outcome.ok || outcome.output.isBlank() -> ProbeResult(
+                    probeOk = false,
+                    error = tailOf(outcome.output.ifBlank { "ffprobe 无输出" }, 200)
+                )
+
+                else -> parseMediaJson(outcome.output)
             }
-            parseMediaJson(output)
         } catch (e: Exception) {
             ProbeResult(probeOk = false, error = "探测异常: ${e.message}")
         }

@@ -9,6 +9,7 @@ import com.xixka.losslesstrim.data.AppSettings
 import com.xixka.losslesstrim.data.FileResult
 import com.xixka.losslesstrim.data.Outcome
 import com.xixka.losslesstrim.data.PerFileOverride
+import com.xixka.losslesstrim.data.ScanProgress
 import com.xixka.losslesstrim.data.Scanner
 import com.xixka.losslesstrim.data.SettingsRepository
 import com.xixka.losslesstrim.data.VideoEntry
@@ -49,6 +50,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _scanning = MutableStateFlow(false)
     val scanning = _scanning.asStateFlow()
+
+    /** 扫描进度（解析中才有值）：已完成数/总数 + 当前文件名，让长扫描可见 */
+    private val _scanProgress = MutableStateFlow<ScanProgress?>(null)
+    val scanProgress = _scanProgress.asStateFlow()
 
     private val _scanMsg = MutableStateFlow<String?>(null)
     val scanMsg = _scanMsg.asStateFlow()
@@ -189,9 +194,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         scanJob?.cancel()
         _scanning.value = true
         _scanMsg.value = null
+        _scanProgress.value = null
         scanJob = viewModelScope.launch {
             try {
-                val result = Scanner.scanFolder(getApplication(), tree)
+                val result = Scanner.scanFolder(getApplication(), tree) { p ->
+                    _scanProgress.value = p
+                }
                 val list = result.entries
                 _files.value = list
                 _orphans.value = result.orphans
@@ -212,6 +220,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 _scanMsg.value = "扫描失败：${e.message}"
             } finally {
                 _scanning.value = false
+                _scanProgress.value = null
             }
         }
     }
