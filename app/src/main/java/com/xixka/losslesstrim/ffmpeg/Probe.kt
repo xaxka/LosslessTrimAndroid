@@ -79,7 +79,11 @@ object Probe {
     /** L1 条目：结果 + 入缓时间（超 [ProbeStore.CACHE_TTL_MS] 过期，与 L2 同款时效） */
     private class CachedKfs(val kfs: List<Double>, val at: Long)
 
-    /** 关键帧缓存（uri string → 升序关键帧时间列表，仅全量扫描），L1 + L2 见类注释 */
+    /**
+     * 关键帧缓存（uri → 全量扫描结果；`uri@near:切点键` → 邻域窗口结果），
+     * L1 + L2 见类注释。邻域条目键带切点集合，只被同切点查询命中，不会
+     * 冒充全量；两类条目共用此 LRU（上限按条目数计）。
+     */
     private val keyframeCache = Collections.synchronizedMap(
         object : LinkedHashMap<String, CachedKfs>(16, 0.75f, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedKfs>?): Boolean =
@@ -417,10 +421,16 @@ object Probe {
      * 要顺序读完整文件（每片数十秒），批量队列"每处理完一个文件干等半天"的
      * 主因之一；定点读通常只触碰文件几 MB。
      *
+     * 缓存优先（三层，命中即零探测）：
+     * 1. 全量关键帧已缓存（L1/L2，如进过分析页）→ 直接返回全量列表——
+     *    信息是全量的超集，对齐精度只增不减，何必再定点读；
+     * 2. 同文件同切点的邻域结果已缓存（L1/L2，如刚跑过这批任务后重试）→
+     *    直接复用；键含切点集合，换切点自然 miss；
+     * 3. 未命中才真正探测，结果按 (uri + 切点集合) 入 L1/L2。
+     *
      * 结果校验：每个有效切点的邻域内必须同时存在 ≤t 与 ≥t 的关键帧（切点贴着
      * 0 或片长时只查存在侧），凑不齐视为超长 GOP 或 seek 失败，退回全量扫描，
      * 保证 [com.xixka.losslesstrim.trim.TrimPlanner] 对齐结果与全量一致。
-     * 注意：窗口结果**不写任何缓存**（只覆盖切点附近，冒充全量会污染后续对齐）。
      */
     suspend fun probeKeyframesNear(
         context: Context,
@@ -428,11 +438,34 @@ object Probe {
         points: List<Double>,
         durSec: Double,
     ): List<Double> = withContext(Dispatchers.IO) {
-        val path = com.xixka.losslesstrim.util.StorageAccess
-            .accessibleFile(context, uri)?.absolutePath ?: return@withContext emptyList()
+        val key = uri.toString()
+        val file = com.xixka.losslesstrim.util.StorageAccess
+            .accessibleFile(context, uri) ?: return@withContext emptyList()
         if (durSec <= 0 || points.isEmpty()) return@withContext emptyList()
         try {
             val clamped = points.map { it.coerceIn(0.0, durSec) }.distinct().sorted()
+            val now = System.currentTimeMillis()
+            val fresh = { at: Long -> now - at <= ProbeStore.CACHE_TTL_MS }
+
+            // 缓存层 1：全量关键帧在手 → 超集直接用
+            keyframeCache[key]?.takeIf { fresh(it.at) }?.let { return@withContext it.kfs }
+            ProbeStore.loadKeyframes(context, key, file)?.let {
+                keyframeCache[key] = CachedKfs(it, now)
+                return@withContext it
+            }
+
+            // 缓存层 2：同文件同切点的邻域结果
+            val pointsKey = clamped.joinToString(",") {
+                String.format(java.util.Locale.US, "%.3f", it)
+            }
+            val nearKey = "$key@near:$pointsKey"
+            keyframeCache[nearKey]?.takeIf { fresh(it.at) }?.let { return@withContext it.kfs }
+            ProbeStore.loadNearKeyframes(context, key, pointsKey, file)?.let {
+                keyframeCache[nearKey] = CachedKfs(it, now)
+                return@withContext it
+            }
+
+            val path = file.absolutePath
             // 窗口按起点排序后合并重叠/相邻区间：两切点邻近时一次区间读掉
             val raw = clamped.map {
                 (it - KEYFRAME_WINDOW_SEC).coerceAtLeast(0.0) to
@@ -468,6 +501,9 @@ object Probe {
                 }
             }
             if (!valid) return@withContext probeKeyframes(context, uri)
+            // 仅"窗口凑齐对齐所需关键帧"的结果可缓存：验证过的窗口对同切点可安全复用
+            keyframeCache[nearKey] = CachedKfs(sorted, now)
+            ProbeStore.saveNearKeyframes(context, key, pointsKey, file, sorted)
             sorted
         } catch (e: Exception) {
             probeKeyframes(context, uri)

@@ -46,11 +46,30 @@ data class ProbeCacheEntity(
 /**
  * 关键帧**全量**扫描持久缓存（Room，L2）。只存全量扫描结果——
  * probeKeyframesNear 的邻域窗口结果只覆盖切点附近，冒充全量会污染
- * 后续换切点的对齐，严禁入库。
+ * 后续换切点的对齐，严禁入**本表**（邻域结果有自己的表，见
+ * [NearKfCacheEntity]，键含切点集合，不会与全量混淆）。
  */
 @Entity(tableName = "keyframe_cache")
 data class KeyframeCacheEntity(
     @PrimaryKey val uri: String,
+    val sizeBytes: Long,
+    val modifiedMs: Long,
+    val keyframesJson: String,
+    val updatedAt: Long,
+)
+
+/**
+ * 切点**邻域**关键帧持久缓存（Room，L2）：键 = uri + 切点集合。
+ * 批处理每文件一次邻域探测（1~3s），重试失败项/重跑同批任务时全部
+ * 重新探测是纯浪费——同文件同切点的窗口结果直接复用。
+ * 与全量表严格分离：本表行只对"这组切点"有效，换切点自然 miss 重新
+ * 探测，不存在污染全量语义的问题。
+ */
+@Entity(tableName = "near_keyframe_cache", primaryKeys = ["uri", "pointsKey"])
+data class NearKfCacheEntity(
+    val uri: String,
+    /** 切点集合的确定性编码（升序 "%.3f" 逗号连接），同组切点即同键 */
+    val pointsKey: String,
     val sizeBytes: Long,
     val modifiedMs: Long,
     val keyframesJson: String,
@@ -71,16 +90,29 @@ interface CacheDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun putKeyframes(entity: KeyframeCacheEntity)
 
+    @Query("SELECT * FROM near_keyframe_cache WHERE uri = :uri AND pointsKey = :pointsKey")
+    suspend fun findNearKeyframes(uri: String, pointsKey: String): NearKfCacheEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun putNearKeyframes(entity: NearKfCacheEntity)
+
+    /** 同文件换切点后的旧行清理：只保留该 uri 最近一行（REPLACE 同键，删异键） */
+    @Query("DELETE FROM near_keyframe_cache WHERE uri = :uri AND pointsKey != :keepKey")
+    suspend fun pruneNearOtherPoints(uri: String, keepKey: String): Int
+
     @Query("DELETE FROM probe_cache WHERE updatedAt < :threshold")
     suspend fun pruneProbe(threshold: Long): Int
 
     @Query("DELETE FROM keyframe_cache WHERE updatedAt < :threshold")
     suspend fun pruneKeyframes(threshold: Long): Int
+
+    @Query("DELETE FROM near_keyframe_cache WHERE updatedAt < :threshold")
+    suspend fun pruneNearKeyframes(threshold: Long): Int
 }
 
 @Database(
-    entities = [ProbeCacheEntity::class, KeyframeCacheEntity::class],
-    version = 1,
+    entities = [ProbeCacheEntity::class, KeyframeCacheEntity::class, NearKfCacheEntity::class],
+    version = 2,
     exportSchema = false,
 )
 abstract class CacheDb : RoomDatabase() {
@@ -189,6 +221,54 @@ object ProbeStore {
         }
     }
 
+    /** 命中且未过期、未陈旧才返回（该切点集合的邻域关键帧），否则 null */
+    suspend fun loadNearKeyframes(
+        context: Context,
+        uri: String,
+        pointsKey: String,
+        file: File,
+    ): List<Double>? = withContext(Dispatchers.IO) {
+        runCatching {
+            val e = CacheDb.get(context).dao().findNearKeyframes(uri, pointsKey)
+                ?: return@runCatching null
+            if (!fresh(e.updatedAt) || e.sizeBytes != file.length() || e.modifiedMs != file.lastModified()) {
+                null
+            } else {
+                kfsFromJson(e.keyframesJson).takeIf { it.isNotEmpty() }
+            }
+        }.getOrNull()
+    }
+
+    /**
+     * 存邻域结果并清掉同文件其他切点的旧行：一行只占几百字节，
+     * 但不清理会在用户反复调切点时无限累积；"最近一组切点"是
+     * 重试场景的实际命中集，保留一行足够。
+     */
+    suspend fun saveNearKeyframes(
+        context: Context,
+        uri: String,
+        pointsKey: String,
+        file: File,
+        kfs: List<Double>,
+    ) {
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val dao = CacheDb.get(context).dao()
+                dao.putNearKeyframes(
+                    NearKfCacheEntity(
+                        uri = uri,
+                        pointsKey = pointsKey,
+                        sizeBytes = file.length(),
+                        modifiedMs = file.lastModified(),
+                        keyframesJson = kfsToJson(kfs),
+                        updatedAt = System.currentTimeMillis(),
+                    )
+                )
+                dao.pruneNearOtherPoints(uri, pointsKey)
+            }
+        }
+    }
+
     private suspend fun pruneOnce(context: Context) {
         if (!pruned.compareAndSet(false, true)) return
         runCatching {
@@ -196,6 +276,7 @@ object ProbeStore {
             val threshold = System.currentTimeMillis() - CACHE_TTL_MS
             CacheDb.get(context).dao().pruneProbe(threshold)
             CacheDb.get(context).dao().pruneKeyframes(threshold)
+            CacheDb.get(context).dao().pruneNearKeyframes(threshold)
         }
     }
 
