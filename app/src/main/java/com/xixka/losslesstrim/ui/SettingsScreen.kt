@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -15,6 +16,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
@@ -22,15 +24,27 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.xixka.losslesstrim.data.AlignStrategy
 import com.xixka.losslesstrim.data.OutputContainer
+import com.xixka.losslesstrim.update.Updater
+import com.xixka.losslesstrim.ui.theme.BlSurfaceVariant
 import com.xixka.losslesstrim.ui.theme.BlChipShape
 import com.xixka.losslesstrim.ui.theme.BlExt
+import com.xixka.losslesstrim.util.Formats
 
 /** 设置页：分组卡片（组标题 labelM 灰字 + 白卡内多行项） */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -112,6 +126,9 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
                     color = BlExt.textSecondary,
                 )
             }
+
+            GroupLabel("更新")
+            UpdateSection()
         }
     }
 }
@@ -124,6 +141,143 @@ private fun GroupLabel(text: String) {
         color = BlExt.textSecondary,
         modifier = Modifier.padding(start = 4.dp, top = 8.dp),
     )
+}
+
+/**
+ * 检查更新卡片：当前版本 + 检查按钮，按 Updater 状态机展示
+ * 新版本信息 / 下载进度 / 安装入口 / 错误提示。
+ */
+@Composable
+private fun UpdateSection() {
+    val context = LocalContext.current
+    val updState by Updater.state.collectAsState()
+    val current by remember { Updater.currentVersion(context) }
+
+    // "允许安装未知应用"授权状态：从系统授权页返回（ON_RESUME）时刷新
+    var installAllowed by remember { mutableStateOf(Updater.canInstall(context)) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) installAllowed = Updater.canInstall(context)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    SectionCard(title = null) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column {
+                Text("当前版本", style = MaterialTheme.typography.bodyMedium, color = BlExt.textSecondary)
+                Text(
+                    "v${current.first}（${current.second}）",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.secondary,
+                )
+            }
+            BlOutlinedButton(
+                onClick = { Updater.check(context) },
+                enabled = updState !is Updater.State.Checking && updState !is Updater.State.Downloading,
+            ) { Text("检查更新") }
+        }
+
+        when (val s = updState) {
+            Updater.State.Idle -> Text(
+                "检查 GitHub Releases 上的最新发布版本",
+                style = MaterialTheme.typography.labelSmall,
+                color = BlExt.textSecondary,
+            )
+
+            Updater.State.Checking -> Text(
+                "正在检查更新…",
+                style = MaterialTheme.typography.labelSmall,
+                color = BlExt.textSecondary,
+            )
+
+            Updater.State.UpToDate -> Text(
+                "已是最新版本",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.secondary,
+            )
+
+            is Updater.State.Available -> {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                Text(
+                    "发现新版本 v${s.info.versionName}",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.secondary,
+                )
+                Text(
+                    "更新包 ${Formats.size(s.info.apkSize)}，下载自 GitHub Releases",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = BlExt.textSecondary,
+                )
+                BlOutlinedButton(
+                    onClick = { Updater.download(context) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("下载更新包") }
+            }
+
+            is Updater.State.Downloading -> {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                val pct = if (s.total > 0) (s.received.toFloat() / s.total).coerceIn(0f, 1f) else null
+                LinearProgressIndicator(
+                    progress = { pct ?: 0f },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .clip(MaterialTheme.shapes.extraSmall),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = BlSurfaceVariant,
+                )
+                Text(
+                    if (pct != null) {
+                        "下载中 ${Formats.size(s.received)} / ${Formats.size(s.total)}（${(pct * 100).toInt()}%）"
+                    } else {
+                        "下载中 ${Formats.size(s.received)}"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = BlExt.textSecondary,
+                )
+                BlOutlinedButton(
+                    onClick = { Updater.cancelDownload() },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("取消下载") }
+            }
+
+            is Updater.State.ReadyToInstall -> {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                Text(
+                    "v${s.info.versionName} 更新包已就绪",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.secondary,
+                )
+                if (!installAllowed) {
+                    Text(
+                        "首次安装需允许本应用安装未知应用：点\"安装\"会跳转系统授权页，允许后返回再点一次安装",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = BlExt.textSecondary,
+                    )
+                }
+                BlOutlinedButton(
+                    onClick = {
+                        if (Updater.canInstall(context)) Updater.install(context)
+                        else Updater.requestInstallPermission(context)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("安装") }
+            }
+
+            is Updater.State.Error -> Text(
+                s.message,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+    }
 }
 
 @Composable

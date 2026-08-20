@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 应用内更新包下载目录：优先外部私有目录，不可用时退回 cacheDir（两处都需登记） -->
+    <external-files-path name="updates" path="updates/" />
+    <cache-path name="updates_cache" path="updates/" />
+</paths>
