@@ -14,6 +14,9 @@ data class StreamInfo(
     val width: Int?,
     val height: Int?,
     val attachedPic: Boolean,  // 封面图轨
+    // 视频重排缓冲大小（ffprobe has_b_frames，>0 即含 B 帧）；null=未知（旧缓存行/
+    // 平台 MediaExtractor 兜底），见 docs/mkv-bframe-seek-offset.md §7
+    val hasBFrames: Int? = null,
 ) {
     val isVideo: Boolean get() = codecType == "video" && !attachedPic
     val isAudio: Boolean get() = codecType == "audio"

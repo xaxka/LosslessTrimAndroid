@@ -574,6 +574,7 @@ object Probe {
                         width = if (s.has("width")) s.optInt("width") else null,
                         height = if (s.has("height")) s.optInt("height") else null,
                         attachedPic = (disp?.optInt("attached_pic", 0) ?: 0) == 1,
+                        hasBFrames = if (s.has("has_b_frames")) s.optInt("has_b_frames") else null,
                     )
                 )
                 if (duration == null) {

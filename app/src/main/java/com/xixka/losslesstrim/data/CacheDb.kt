@@ -296,6 +296,7 @@ object ProbeStore {
             s.width?.let { o.put("width", it) }
             s.height?.let { o.put("height", it) }
             o.put("attachedPic", s.attachedPic)
+            s.hasBFrames?.let { o.put("hasBFrames", it) }
             arr.put(o)
         }
         return arr.toString()
@@ -318,6 +319,8 @@ object ProbeStore {
                     width = if (o.has("width")) o.getInt("width") else null,
                     height = if (o.has("height")) o.getInt("height") else null,
                     attachedPic = o.optBoolean("attachedPic", false),
+                    // 旧缓存行无此字段 → null（未知），消费侧按"含 B 帧"处理
+                    hasBFrames = if (o.has("hasBFrames")) o.optInt("hasBFrames") else null,
                 )
             )
         }

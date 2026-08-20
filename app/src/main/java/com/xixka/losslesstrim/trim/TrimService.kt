@@ -276,7 +276,7 @@ class TrimService : Service() {
                     entry, plan, Outcome.FAILED, entry.sizeBytes,
                     reason = "另存目标无法定位为本地路径（未授权或非本地存储），SAF 通道已移除"
                 )
-            val cmd = buildCommand(inParam, outFile.absolutePath, plan, kept, target)
+            val cmd = buildCommand(inParam, outFile.absolutePath, plan, kept, target, entry)
             val session = runFfmpeg(cmd) { timeMs, speed ->
                 val p = (timeMs / 1000.0 / durSec).toFloat().coerceIn(0f, 1f)
                 publishRunning(idx, total, entry.name, p, String.format(Locale.US, "%.1fx", speed))
@@ -338,7 +338,7 @@ class TrimService : Service() {
         val partFile = File(outDirFile, "$finalName.part")
         if (partFile.exists()) partFile.delete()
 
-        val cmd = buildCommand(inParam, partFile.absolutePath, plan, kept, target)
+        val cmd = buildCommand(inParam, partFile.absolutePath, plan, kept, target, entry)
         val session = runFfmpeg(cmd) { timeMs, speed ->
             val p = (timeMs / 1000.0 / durSec).toFloat().coerceIn(0f, 1f)
             publishRunning(idx, total, entry.name, p, String.format(Locale.US, "%.1fx", speed))
@@ -474,11 +474,29 @@ class TrimService : Service() {
         plan: TrimPlan,
         kept: List<Int>,
         target: OutputTarget,
+        entry: VideoEntry,
     ): String {
+        // ffmpeg 对未设 AVFMT_SEEK_TO_PTS 的封装（matroska/webm 等）在视频含 B 帧时，
+        // 会把 -ss 的 seek 目标前移 3/23s（≈130.4ms，DTS 启发修正，ffmpeg_opt.c）；
+        // MKV 的 Cues 条目又精确落在各关键帧 PTS 上，目标被前移后向后搜索命中前一个
+        // 关键帧，实际起点比对齐点早一个 GOP（详见 docs/mkv-bframe-seek-offset.md）。
+        // 这里把该量预先补回：-ss 加 0.131（3/23 向上取整到 ms，抵消 secs3 格式化
+        // 舍入后仍留 ~66µs 余量）；-t 锚定在 -ss 值上（停止条件 pts ≥ ss+t），
+        // 须同步减去同量，终点才能仍落在 actualEnd。
+        // 门控：matroska/webm 输入 && 视频含 B 帧 && 起点在片中（片头无"更早的
+        // 关键帧"可错落，不加）。hasBFrames 未知（旧缓存/平台兜底）按含 B 帧处理：
+        // 无 B 帧误加仅当 GOP<131ms 才可能出错（极罕见），反向漏加则稳定复现本 bug。
+        val matroskaIn = entry.probe.formatName.split(',').any {
+            val f = it.trim(); f == "matroska" || f == "webm"
+        }
+        val hasB = entry.probe.streams.firstOrNull { it.isVideo }?.hasBFrames ?: 1
+        val fudge = if (matroskaIn && plan.actualStart > 0.001 && hasB > 0) 0.131 else 0.0
+        val ss = plan.actualStart + fudge
+        val dur = (plan.actualEnd - ss).coerceAtLeast(0.001)
         val sb = StringBuilder()
-        sb.append("-hide_banner -y -ss ").append(Formats.secs3(plan.actualStart))
+        sb.append("-hide_banner -y -ss ").append(Formats.secs3(ss))
         sb.append(" -noaccurate_seek -i \"").append(inParam).append("\"")
-        sb.append(" -t ").append(Formats.secs3(plan.duration))
+        sb.append(" -t ").append(Formats.secs3(dur))
         for (i in kept) sb.append(" -map 0:").append(i)
         sb.append(" -c copy -map_metadata 0 -avoid_negative_ts make_zero")
         if (target.muxer == "mp4") sb.append(" -movflags +faststart")
