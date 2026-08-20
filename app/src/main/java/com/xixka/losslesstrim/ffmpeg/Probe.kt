@@ -3,7 +3,7 @@ package com.xixka.losslesstrim.ffmpeg
 import android.content.Context
 import android.net.Uri
 import com.antonkarpenko.ffmpegkit.FFmpegKitConfig
-import com.antonkarpenko.ffmpegkit.FFprobeKit
+import com.antonkarpenko.ffmpegkit.FFprobeSession
 import com.xixka.losslesstrim.data.ProbeResult
 import com.xixka.losslesstrim.data.StreamInfo
 import kotlinx.coroutines.Dispatchers
@@ -28,18 +28,36 @@ object Probe {
         }
     )
 
+    /**
+     * 同步执行 ffprobe 并取回**完整**输出。
+     * 输出经 SessionBridge 的全局回调采集，不依赖 ffmpeg-kit 会话历史：
+     * 修复并发扫描时正在运行的会话被挤出历史（history=2）导致输出被截断、
+     * JSON 在半途突然结束（"End of input at character NNN"）的问题。
+     */
+    private fun runProbe(cmd: String): Pair<Boolean, String> {
+        SessionBridge.init()
+        val session = FFprobeSession.create(FFmpegKitConfig.parseArguments(cmd))
+        SessionBridge.beginLogs(session.sessionId)
+        var output = ""
+        try {
+            FFmpegKitConfig.ffprobeExecute(session)
+        } finally {
+            output = SessionBridge.endLogs(session.sessionId)
+        }
+        val rc = session.returnCode
+        return (rc != null && rc.isValueSuccess) to output
+    }
+
     suspend fun probeMedia(context: Context, uri: Uri): ProbeResult = withContext(Dispatchers.IO) {
         try {
             val input = FFmpegKitConfig.getSafParameterForRead(context, uri)
-            val session = FFprobeKit.execute(
+            val (ok, output) = runProbe(
                 "-v error -show_streams -show_format -of json -i \"$input\""
             )
-            val output = session.allLogsAsString
-            val rc = session.returnCode
-            if (rc == null || !rc.isValueSuccess || output.isNullOrBlank()) {
+            if (!ok || output.isBlank()) {
                 return@withContext ProbeResult(
                     probeOk = false,
-                    error = tailOf(session.allLogsAsString ?: "ffprobe 无输出", 200)
+                    error = tailOf(output.ifBlank { "ffprobe 无输出" }, 200)
                 )
             }
             parseMediaJson(output)
@@ -54,12 +72,10 @@ object Probe {
             val input = FFmpegKitConfig.getSafParameterForRead(context, uri)
             // CSV 而非 JSON：长视频全量 packet 输出可达几十 MB，CSV 体积约减半，
             // 且免去 JSONObject 整树解析的内存峰值（这是批处理时 OOM 的主要诱因之一）
-            val session = FFprobeKit.execute(
+            val (ok, output) = runProbe(
                 "-v error -select_streams v:0 -show_entries packet=pts_time,flags -of csv=p=0 -i \"$input\""
             )
-            val output = session.allLogsAsString
-            val rc = session.returnCode
-            if (rc != null && rc.isValueSuccess && !output.isNullOrBlank()) {
+            if (ok && output.isNotBlank()) {
                 // 仅成功结果写入缓存；失败不缓存，避免同一文件整个进程周期内都无法重试对齐
                 val parsed = parseKeyframeCsv(output)
                 keyframeCache[uri.toString()] = parsed

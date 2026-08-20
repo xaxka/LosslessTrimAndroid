@@ -18,6 +18,7 @@ import com.xixka.losslesstrim.data.FileResult
 import com.xixka.losslesstrim.data.Outcome
 import com.xixka.losslesstrim.data.TrimPlan
 import com.xixka.losslesstrim.ffmpeg.Probe
+import com.xixka.losslesstrim.ffmpeg.SessionBridge
 import com.xixka.losslesstrim.util.Formats
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -422,7 +423,11 @@ class TrimService : Service() {
     }
 
     private fun extractError(session: FFmpegSession): String {
-        val logs = session.allLogsAsString ?: return "ffmpeg 失败（无日志）"
+        // 优先取 SessionBridge 定格的完整日志（会话被挤出 ffmpeg-kit 历史时
+        // session.allLogsAsString 只有残缺片段），回退到会话自带日志
+        val logs = SessionBridge.takeDoneLogs(session.sessionId)
+            ?: session.allLogsAsString
+            ?: return "ffmpeg 失败（无日志）"
         val lines = logs.lines()
             .map { it.trim() }
             .filter { it.isNotEmpty() && !it.startsWith("[info]", true) }
@@ -436,22 +441,36 @@ class TrimService : Service() {
         return reason.ifEmpty { "ffmpeg 失败（返回码 ${session.returnCode?.value}）" }
     }
 
-    /** 挂起等待 ffmpeg 完成，返回 session；协程取消时会触发 FFmpegKit.cancel */
+    /**
+     * 挂起等待 ffmpeg 完成，返回 session；协程取消时会触发 FFmpegKit.cancel。
+     * 日志与进度统计均经 SessionBridge 全局回调采集/路由：ffmpeg 运行期间其他
+     * ffprobe 会话可能把它挤出 ffmpeg-kit 的会话历史（history=2），会话级回调
+     * 会因此丢失（进度冻结、错误日志残缺），全局回调不受影响。
+     */
     private suspend fun runFfmpeg(
         cmd: String,
         onStat: (timeMs: Double, speed: Double) -> Unit,
     ): FFmpegSession? = suspendCancellableCoroutine { cont ->
-        val session = FFmpegKit.executeAsync(
-            cmd,
-            { s -> if (cont.isActive) cont.resume(s) },
-            { /* 日志由 session 收集 */ },
-            { stat -> onStat(stat.time, stat.speed) },
+        SessionBridge.init()
+        val session = FFmpegSession.create(
+            FFmpegKitConfig.parseArguments(cmd),
+            { s ->
+                SessionBridge.endLogs(s.sessionId)
+                SessionBridge.endStats(s.sessionId)
+                if (cont.isActive) cont.resume(s)
+            },
+            null, // 日志经 SessionBridge 采集
+            null, // 进度经 SessionBridge 路由
         )
+        SessionBridge.beginLogs(session.sessionId)
+        SessionBridge.beginStats(session.sessionId) { timeMs, speed -> onStat(timeMs, speed) }
+        FFmpegKitConfig.asyncFFmpegExecute(session)
         cont.invokeOnCancellation {
             try {
                 FFmpegKit.cancel(session.sessionId)
             } catch (_: Exception) {
             }
+            SessionBridge.cleanup(session.sessionId)
         }
     }
 }

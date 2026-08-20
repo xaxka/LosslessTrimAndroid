@@ -4,6 +4,7 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import com.antonkarpenko.ffmpegkit.FFmpegKitConfig
+import com.xixka.losslesstrim.ffmpeg.SessionBridge
 import com.xixka.losslesstrim.trim.TrimService
 
 class MainApplication : Application() {
@@ -11,8 +12,10 @@ class MainApplication : Application() {
         super.onCreate()
         // ffmpeg-kit 默认保留最近 10 个会话（连同全部日志缓冲）驻内存；
         // 关键帧探测的输出可达几十 MB，积压多个会话是批处理时 OOM 的诱因之一。
-        // 本应用只使用 execute/executeAsync 的直接返回值，不依赖会话历史，压到 2 即可。
+        // 历史（history=2）仅作库内部登记使用：应用所需的会话日志/统计一律经
+        // SessionBridge 的全局回调采集，不受会话被挤出历史影响，也不会截断。
         try {
+            SessionBridge.init()
             FFmpegKitConfig.setSessionHistorySize(2)
         } catch (_: Exception) {
         }
