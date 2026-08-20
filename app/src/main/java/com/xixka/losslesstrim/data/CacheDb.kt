@@ -39,6 +39,8 @@ data class ProbeCacheEntity(
     val modifiedMs: Long,
     val durationSec: Double,
     val formatName: String,
+    /** ffprobe format.start_time（可空：null=旧行/未知，消费侧按 0 处理） */
+    val startTimeSec: Double?,
     val streamsJson: String,
     val updatedAt: Long,
 )
@@ -112,7 +114,7 @@ interface CacheDao {
 
 @Database(
     entities = [ProbeCacheEntity::class, KeyframeCacheEntity::class, NearKfCacheEntity::class],
-    version = 2,
+    version = 3,
     exportSchema = false,
 )
 abstract class CacheDb : RoomDatabase() {
@@ -166,6 +168,7 @@ object ProbeStore {
                         probeOk = true,
                         durationSec = e.durationSec,
                         formatName = e.formatName,
+                        startTimeSec = e.startTimeSec,
                         streams = streamsFromJson(e.streamsJson),
                     )
                 }
@@ -183,6 +186,7 @@ object ProbeStore {
                         modifiedMs = file.lastModified(),
                         durationSec = result.durationSec,
                         formatName = result.formatName,
+                        startTimeSec = result.startTimeSec,
                         streamsJson = streamsToJson(result.streams),
                         updatedAt = System.currentTimeMillis(),
                     )

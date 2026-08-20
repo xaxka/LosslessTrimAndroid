@@ -1,0 +1,154 @@
+# 临时验证 workflow：MKV+B帧 seek 补偿修复（docs/mkv-bframe-seek-offset.md）
+# 验证通过后删除本文件（单元测试 SeekFudgeTest.kt 保留）。
+name: Verify MKV B-frame fix
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests (seekFudgeSec gating logic)
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest --no-daemon --stacktrace
+
+      # ---- E2E：runner 自带 ffmpeg 复现文档测试矩阵 ----
+      # 样例A：aac（start_time=-23ms，AAC priming）样例B：pcm（start_time=0）。
+      # 每样例跑 T1（无补偿 → bug 应复现：字幕 ~4s）和 T3（补偿后 → 字幕 ~2s
+      # 且首包为关键帧）。补偿量按 App 公式 fudge = 0.131 + max(0,-start_time)。
+      - name: E2E reproduce and verify compensation
+        shell: bash
+        run: |
+          set -uo pipefail
+          W="$(mktemp -d)"
+          cd "$W"
+          ffmpeg -version | head -1
+
+          cat > subs.srt <<'EOF'
+          1
+          00:00:05,000 --> 00:00:07,000
+          At5s
+
+          2
+          00:00:32,000 --> 00:00:34,000
+          At32s
+
+          3
+          00:00:38,000 --> 00:00:40,000
+          At38s
+
+          4
+          00:00:52,000 --> 00:00:54,000
+          At52s
+          EOF
+
+          gen() { # $1=输出 $2=音频编码
+            ffmpeg -hide_banner -loglevel error -y \
+              -f lavfi -i "testsrc2=size=640x360:rate=25:duration=60.1" \
+              -f lavfi -i "sine=frequency=440:r=44100:duration=60.1" \
+              -i subs.srt -map 0:v -map 1:a -map 2:s \
+              -c:v libx264 -preset ultrafast -bf 2 -g 50 -keyint_min 50 -sc_threshold 0 \
+              -c:a "$2" -c:s srt "$1"
+          }
+          gen sub_aac.mkv aac
+          gen sub_pcm.mkv pcm_s16le
+
+          kf_near_30() {
+            ffprobe -v error -select_streams v:0 -show_entries packet=pts_time,flags -of csv=p=0 "$1" \
+              | python3 -c "
+          import sys
+          for line in sys.stdin.read().splitlines():
+              p = line.split(',')
+              if len(p) >= 2 and 'K' in p[1] and 29.9 <= float(p[0]) <= 30.1:
+                  print(p[0]); break
+          "
+          }
+          sub_pts() {
+            ffprobe -v error -select_streams s:0 -show_entries packet=pts_time -of csv=p=0 "$1" \
+              | python3 -c "import sys; ls=sys.stdin.read().splitlines(); print(ls[0] if ls else '')"
+          }
+          first_video() {
+            ffprobe -v error -select_streams v:0 -show_entries packet=pts_time,flags -of csv=p=0 "$1" \
+              | python3 -c "import sys; ls=sys.stdin.read().splitlines(); print(ls[0] if ls else '')"
+          }
+          fmt_start() {
+            ffprobe -v error -show_entries format=start_time -of csv=p=0 "$1"
+          }
+
+          run_case() { # $1=样例名 $2=文件
+            local name="$1" f="$2"
+            local KF ST BF
+            KF="$(kf_near_30 "$f")"
+            ST="$(fmt_start "$f")"
+            BF="$(ffprobe -v error -select_streams v:0 -show_entries stream=has_b_frames -of csv=p=0 "$f")"
+            echo "== $name: kf=$KF start_time=$ST has_b_frames=$BF"
+            [ -n "$KF" ] || { echo "FAIL: no keyframe near 30s"; exit 1; }
+            [ "$BF" -gt 0 ] || { echo "FAIL: no B-frames"; exit 1; }
+
+            # T1：无补偿（App 旧命令）→ 起点应早一个 GOP（字幕 ~4.08s 而非 ~2.08s）
+            ffmpeg -hide_banner -loglevel error -y -ss "$KF" -noaccurate_seek -i "$f" \
+              -t "$(python3 -c "print(f'{60.1-$KF:.3f}')")" \
+              -map 0:0 -map 0:1 -map 0:2 -c copy -map_metadata 0 \
+              -avoid_negative_ts make_zero -f matroska t1.mkv
+            local T1S; T1S="$(sub_pts t1.mkv)"
+            echo "   T1 (no fudge):    first-sub=$T1S  (bug 复现则 ~4s)"
+
+            # T3：App 新命令（fudge = 0.131 + max(0,-start_time)）→ 起点精确落 KF
+            local SS T
+            SS="$(python3 -c "
+          st = float('$ST') if '$ST' not in ('N/A','') else 0.0
+          fudge = 0.131 + max(0.0, -st)
+          print(f'{$KF + fudge:.3f}')")"
+            T="$(python3 -c "
+          st = float('$ST') if '$ST' not in ('N/A','') else 0.0
+          fudge = 0.131 + max(0.0, -st)
+          print(f'{60.1 - $KF - fudge:.3f}')")"
+            ffmpeg -hide_banner -loglevel error -y -ss "$SS" -noaccurate_seek -i "$f" \
+              -t "$T" -map 0:0 -map 0:1 -map 0:2 -c copy -map_metadata 0 \
+              -avoid_negative_ts make_zero -f matroska t3.mkv
+            local T3V T3S
+            T3V="$(first_video t3.mkv)"; T3S="$(sub_pts t3.mkv)"
+            echo "   T3 (fudge=$SS-$KF): first-video=$T3V first-sub=$T3S  (修复则 ~0 / ~2s)"
+
+            python3 - "$T1S" "$T3V" "$T3S" "$name" <<'PY'
+          import sys
+          t1s, t3v_raw, t3s, name = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+          t1s, t3s = float(t1s), float(t3s)
+          parts = [p.strip() for p in t3v_raw.split(',')]
+          t3_pts = float(parts[0]); t3_flags = parts[1] if len(parts) > 1 else ''
+          fail = []
+          if not (3.0 < t1s < 5.0):
+              fail.append(f"[{name}] T1 first-sub={t1s}s, expected ~4s (bug not reproduced?)")
+          if not (-0.05 <= t3_pts <= 0.2):
+              fail.append(f"[{name}] T3 first-video pts={t3_pts}s, expected ~0")
+          if 'K' not in t3_flags:
+              fail.append(f"[{name}] T3 first video packet not keyframe: {t3v_raw}")
+          if not (1.7 < t3s < 2.4):
+              fail.append(f"[{name}] T3 first-sub={t3s}s, expected ~2.0s")
+          if fail:
+              print("E2E FAILED:")
+              for f in fail: print(" -", f)
+              sys.exit(1)
+          print(f"[{name}] OK: bug reproduced without fudge; compensated cut lands exactly on keyframe")
+          PY
+          }
+
+          run_case "aac/negative-start_time" sub_aac.mkv
+          run_case "pcm/zero-start_time" sub_pcm.mkv
+          echo "E2E PASSED"

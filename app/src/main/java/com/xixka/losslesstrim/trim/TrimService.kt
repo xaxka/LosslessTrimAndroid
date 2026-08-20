@@ -19,6 +19,7 @@ import com.antonkarpenko.ffmpegkit.FFmpegKitConfig
 import com.antonkarpenko.ffmpegkit.FFmpegSession
 import com.xixka.losslesstrim.data.FileResult
 import com.xixka.losslesstrim.data.Outcome
+import com.xixka.losslesstrim.data.ProbeResult
 import com.xixka.losslesstrim.data.TrimPlan
 import com.xixka.losslesstrim.data.VideoEntry
 import com.xixka.losslesstrim.ffmpeg.Probe
@@ -48,6 +49,49 @@ class TrimService : Service() {
         const val ACTION_CANCEL = "com.xixka.losslesstrim.ACTION_CANCEL"
         const val CHANNEL_ID = "trim_queue"
         const val NOTIF_ID = 1001
+
+        /**
+         * MKV+B帧 seek 前移补偿量（秒）：3/23≈130.4ms 向上取整到 ms，抵消
+         * [Formats.secs3] 三位小数舍入后仍留 ~66µs 余量。详见
+         * docs/mkv-bframe-seek-offset.md。
+         */
+        const val SEEK_FUDGE_SEC = 0.131
+
+        /**
+         * 是否需要对 -ss 加补偿及补偿量（纯函数，单测覆盖）。
+         * 门控：matroska/webm 输入 && 视频含 B 帧 && 起点在片中。
+         *
+         * ffmpeg 对未设 AVFMT_SEEK_TO_PTS 的封装（matroska/webm 等）在视频含
+         * B 帧时会把 -ss 的 seek 目标前移 3/23s（DTS 启发修正，ffmpeg_demux.c），
+         * Cues 向后搜索命中前一个关键帧 → 起点早落一个 GOP。
+         *
+         * 另有第二个偏移源常被忽略：ffmpeg 会把 ic->start_time 加进 seek 目标
+         * （ffmpeg_demux.c: timestamp += ic->start_time）。AAC priming 等会让
+         * 音/字幕轨起始 pts 为负 → start_time<0（实测样例 -23ms），等效于把目标
+         * 又前移了 |start_time|，仅补 3/23s 不够、bug 复现。故：
+         *
+         *   fudge = SEEK_FUDGE_SEC + max(0, -start_time)
+         *
+         * start_time>0 时不缩小补偿（多补无害：只要 fudge < GOP 间距，落点不变；
+         * 少补有风险）。start_time 未知（null）按 0 处理——探测路径必带该字段，
+         * 仅旧缓存行为 null，且缓存有 24h TTL 自然刷新。
+         *
+         * hasBFrames 未知（null=旧缓存行/平台兜底）按含 B 帧处理：漏加会稳定
+         * 复现本 bug，误加仅当 GOP<131ms 才可能出错（极罕见）。
+         */
+        fun seekFudgeSec(actualStart: Double, probe: ProbeResult): Double {
+            if (actualStart <= 0.001) return 0.0
+            val matroskaIn = probe.formatName.split(',').any {
+                val f = it.trim(); f == "matroska" || f == "webm"
+            }
+            if (!matroskaIn) return 0.0
+            // 无视频流（纯音频/仅封面）：无 video_delay，ffmpeg 不做前移，不补偿
+            val video = probe.streams.firstOrNull { it.isVideo } ?: return 0.0
+            val hasB = video.hasBFrames ?: 1
+            if (hasB <= 0) return 0.0
+            val st = probe.startTimeSec ?: 0.0
+            return SEEK_FUDGE_SEC + (-st).coerceAtLeast(0.0)
+        }
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -477,21 +521,9 @@ class TrimService : Service() {
         target: OutputTarget,
         entry: VideoEntry,
     ): String {
-        // ffmpeg 对未设 AVFMT_SEEK_TO_PTS 的封装（matroska/webm 等）在视频含 B 帧时，
-        // 会把 -ss 的 seek 目标前移 3/23s（≈130.4ms，DTS 启发修正，ffmpeg_opt.c）；
-        // MKV 的 Cues 条目又精确落在各关键帧 PTS 上，目标被前移后向后搜索命中前一个
-        // 关键帧，实际起点比对齐点早一个 GOP（详见 docs/mkv-bframe-seek-offset.md）。
-        // 这里把该量预先补回：-ss 加 0.131（3/23 向上取整到 ms，抵消 secs3 格式化
-        // 舍入后仍留 ~66µs 余量）；-t 锚定在 -ss 值上（停止条件 pts ≥ ss+t），
+        // -ss 补偿见 [seekFudgeSec]；-t 锚定在 -ss 值上（停止条件 pts ≥ ss+t），
         // 须同步减去同量，终点才能仍落在 actualEnd。
-        // 门控：matroska/webm 输入 && 视频含 B 帧 && 起点在片中（片头无"更早的
-        // 关键帧"可错落，不加）。hasBFrames 未知（旧缓存/平台兜底）按含 B 帧处理：
-        // 无 B 帧误加仅当 GOP<131ms 才可能出错（极罕见），反向漏加则稳定复现本 bug。
-        val matroskaIn = entry.probe.formatName.split(',').any {
-            val f = it.trim(); f == "matroska" || f == "webm"
-        }
-        val hasB = entry.probe.streams.firstOrNull { it.isVideo }?.hasBFrames ?: 1
-        val fudge = if (matroskaIn && plan.actualStart > 0.001 && hasB > 0) 0.131 else 0.0
+        val fudge = seekFudgeSec(plan.actualStart, entry.probe)
         val ss = plan.actualStart + fudge
         val dur = (plan.actualEnd - ss).coerceAtLeast(0.001)
         val sb = StringBuilder()

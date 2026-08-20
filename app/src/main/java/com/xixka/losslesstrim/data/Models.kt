@@ -60,6 +60,10 @@ data class ProbeResult(
     val probeOk: Boolean,
     val durationSec: Double = 0.0,
     val formatName: String = "",
+    // ffprobe format.start_time（秒，常为负：AAC priming 等导致音/字幕轨起始
+    // pts<0）。ffmpeg seek 时会把它加进目标（ffmpeg_demux.c timestamp += ic->start_time），
+    // 直接影响 -ss 落点补偿量（见 TrimService.seekFudgeSec）；null=未知按 0 处理
+    val startTimeSec: Double? = null,
     val streams: List<StreamInfo> = emptyList(),
     val error: String? = null,
 ) {

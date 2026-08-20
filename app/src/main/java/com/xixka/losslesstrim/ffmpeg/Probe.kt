@@ -588,6 +588,7 @@ object Probe {
                     probeOk = true,
                     durationSec = duration,
                     formatName = format?.optString("format_name") ?: "",
+                    startTimeSec = format?.optString("start_time")?.toDoubleOrNull(),
                     streams = streams.sortedBy { it.index },
                 )
             }
