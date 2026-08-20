@@ -288,14 +288,23 @@ object Probe {
         val extractor = MediaExtractor()
         return try {
             extractor.setDataSource(path)
-            val durSec = extractor.durationUs / 1_000_000.0
-            if (durSec <= 0 || extractor.trackCount <= 0) {
+            if (extractor.trackCount <= 0) {
                 null
             } else {
-                // 轨道顺序与容器轨序一致（MP4/MKV 常规情况同 ffprobe 的全局索引）；
-                // 仅兜底场景使用，title/channelLayout/封面标记等富字段缺失
-                val streams = (0 until extractor.trackCount).map { i -> platformTrack(extractor, i) }
-                ProbeResult(probeOk = true, durationSec = durSec, streams = streams)
+                // MediaExtractor 不暴露容器级时长：取各轨 KEY_DURATION 的最大值（µs）
+                val formats = (0 until extractor.trackCount).map { extractor.getTrackFormat(it) }
+                val durUs = formats.maxOfOrNull { f ->
+                    if (f.containsKey(MediaFormat.KEY_DURATION)) f.getLong(MediaFormat.KEY_DURATION) else 0L
+                } ?: 0L
+                val durSec = durUs / 1_000_000.0
+                if (durSec <= 0) {
+                    null
+                } else {
+                    // 轨道顺序与容器轨序一致（MP4/MKV 常规情况同 ffprobe 的全局索引）；
+                    // 仅兜底场景使用，title/channelLayout/封面标记等富字段缺失
+                    val streams = formats.mapIndexed { i, f -> platformTrack(i, f) }
+                    ProbeResult(probeOk = true, durationSec = durSec, streams = streams)
+                }
             }
         } catch (_: Exception) {
             null
@@ -307,8 +316,7 @@ object Probe {
         }
     }
 
-    private fun platformTrack(extractor: MediaExtractor, index: Int): StreamInfo {
-        val f = extractor.getTrackFormat(index)
+    private fun platformTrack(index: Int, f: MediaFormat): StreamInfo {
         val mime = f.getString(MediaFormat.KEY_MIME) ?: ""
         val type = when {
             mime.startsWith("video/") -> "video"
