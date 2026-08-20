@@ -173,6 +173,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     name = name,
                     sizeBytes = DocUtils.length(getApplication(), uri).coerceAtLeast(0),
                     probe = probe,
+                    filePath = com.xixka.losslesstrim.util.StorageAccess
+                        .accessibleFile(getApplication(), uri)?.absolutePath,
                 )
                 _files.value = listOf(entry)
                 _scanMsg.value = if (probe.probeOk) {

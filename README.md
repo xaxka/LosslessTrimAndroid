@@ -4,7 +4,7 @@
 
 ## 功能
 
-- 选一个文件夹（SAF），自动扫描视频（仅所选目录本身，不含子目录）
+- 选一个文件夹（系统 SAF 选择器），自动扫描视频（仅所选目录本身，不含子目录）；已授予"所有文件"权限时扫描走 File API（比 SAF 子文档查询快 1~2 个数量级），条目身份与 SAF 扫描一致
 - 两种剪辑模式：
   - **头尾裁剪**：片头砍 X 秒、片尾砍 Y 秒（各文件按自身时长计算保留区间）
   - **区间保留**：所有文件统一保留 第A分B秒 → 第C分D秒
@@ -21,7 +21,8 @@
 - Kotlin + Jetpack Compose（Material 3）
 - UI 遵循 **Blue Light UI** 设计系统：固定浅色（冷白底 × 白卡 1dp 描边 × 浅蓝主强调 × 语义状态色），无阴影卡片、统一空状态、统计卡结果页
 - [ffmpeg-kit 社区维护版 fork](https://github.com/sk3llo/ffmpeg-kit-flutter)（`com.antonkarpenko:ffmpeg-kit-min`，官方 ffmpeg-kit 已归档）
-- SAF 存储访问（`saf:` 协议直接读写，无需 `MANAGE_EXTERNAL_STORAGE`）
+- 存储访问双管线：优先"所有文件"权限 + 直接文件路径读写；未授权自动退回 SAF（`saf:` 协议）
+  - 直路径是推荐方式：`saf:` 只写描述符上 `-movflags +faststart` 收尾回移数据不可靠，部分设备产出缺 moov 的坏 MP4（表现为"输出校验失败 moov atom not found"），终检会拦截并回滚原文件
 - DataStore 参数记忆、前台 Service（dataSync）串行队列
 
 ## 构建

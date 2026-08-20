@@ -60,6 +60,7 @@ import com.xixka.losslesstrim.data.VideoEntry
 import com.xixka.losslesstrim.trim.TrimController
 import com.xixka.losslesstrim.ui.theme.BlExt
 import com.xixka.losslesstrim.util.Formats
+import com.xixka.losslesstrim.util.StorageAccess
 
 /** 主页：模式切换（FilterChip）+ 参数卡 + 双入口（文件夹批量 / 单文件编辑）+ 文件列表 */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -83,6 +84,7 @@ fun HomeScreen(
 
     val snackbar = remember { SnackbarHostState() }
     var showConfirm by remember { mutableStateOf(false) }
+    var showAllFilesDialog by remember { mutableStateOf(false) }
     var hint by remember { mutableStateOf<String?>(null) }
     var afterPermAction by remember { mutableStateOf<(() -> Unit)?>(null) }
 
@@ -104,6 +106,16 @@ fun HomeScreen(
     ) {
         val act = afterPermAction
         afterPermAction = null
+        act?.invoke()
+    }
+
+    // Android 10 及以下：直接文件读写需要传统存储运行时权限
+    val storagePermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val act = afterPermAction
+        afterPermAction = null
+        if (!granted) hint = "未授予存储权限，将退回 SAF 模式（部分设备可能转码失败）"
         act?.invoke()
     }
 
@@ -140,6 +152,17 @@ fun HomeScreen(
         }
         if (processable == 0) {
             hint = "没有可处理的文件"
+            return
+        }
+        // 直接文件读写优先：SAF(saf:)只写描述符上 faststart 收尾回移不可靠，
+        // 是"转码成功但输出校验失败（moov atom not found）"的根因
+        if (!StorageAccess.hasAllFilesAccess(context)) {
+            if (Build.VERSION.SDK_INT >= 30) {
+                showAllFilesDialog = true
+            } else {
+                afterPermAction = { maybeConfirm() }
+                storagePermLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            }
             return
         }
         if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
@@ -461,6 +484,44 @@ fun HomeScreen(
             },
             dismissButton = {
                 androidx.compose.material3.TextButton(onClick = { showConfirm = false }) { Text("取消") }
+            },
+        )
+    }
+
+    // ---------- "所有文件"权限引导（直接文件路径读写的前提） ----------
+    if (showAllFilesDialog) {
+        AlertDialog(
+            onDismissRequest = { showAllFilesDialog = false },
+            title = { Text("需要\u201c所有文件\u201d权限") },
+            text = {
+                Text(
+                    "部分设备上，经系统存储框架（SAF）写出 MP4 会在收尾阶段损坏文件" +
+                            "（moov atom not found），导致转码结果被安全校验拦截删除。\n\n" +
+                            "授予\u201c允许管理所有文件\u201d后，应用将直接读写真实文件路径，" +
+                            "彻底规避该问题；不授权仍可处理，但可能复现此故障。",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    showAllFilesDialog = false
+                    try {
+                        context.startActivity(StorageAccess.allFilesAccessIntent(context))
+                    } catch (_: Exception) {
+                        hint = "无法打开授权页，请到系统设置手动开启"
+                    }
+                }) {
+                    Text(
+                        "去授权",
+                        color = MaterialTheme.colorScheme.secondary,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { showAllFilesDialog = false }) {
+                    Text("暂不")
+                }
             },
         )
     }

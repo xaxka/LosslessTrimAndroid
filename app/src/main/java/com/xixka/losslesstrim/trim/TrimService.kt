@@ -20,18 +20,22 @@ import com.xixka.losslesstrim.data.TrimPlan
 import com.xixka.losslesstrim.ffmpeg.Probe
 import com.xixka.losslesstrim.ffmpeg.SessionBridge
 import com.xixka.losslesstrim.util.Formats
+import com.xixka.losslesstrim.util.StorageAccess
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import java.io.File
 import java.util.Locale
 import kotlin.coroutines.resume
 
 /**
  * 前台服务：串行执行无损剪辑队列。
  * 流程：ffprobe 关键帧 → 计算对齐切点 → ffmpeg -c copy 写 .part → 成功后删原文件并重命名。
+ * 已授予"所有文件"权限时 ffmpeg 直接读写真实路径（faststart 可靠）；
+ * 未授权时退回 saf: 协议（部分设备上写出可能缺 moov，终检会拦截并回滚）。
  */
 class TrimService : Service() {
 
@@ -234,11 +238,50 @@ class TrimService : Service() {
             )
         }
 
-        val inParam = FFmpegKitConfig.getSafParameterForRead(this, entry.docUri)
+        // 已授权全部文件权限且路径可用时优先直路径读：saf: 读描述符在部分
+        // 设备上对长文件读取慢且偶发截断，直路径是普通文件 I/O
+        val inParam = entry.filePath?.let { File(it).takeIf { f -> f.exists() }?.absolutePath }
+            ?: FFmpegKitConfig.getSafParameterForRead(this, entry.docUri)
         val durSec = plan.duration
 
         // ---- 单文件模式：直接写另存目标（无目录写权限，不走 .part/rename） ----
         if (job.outputUri != null) {
+            // 直路径写出（已授予全部文件权限且目标可定位）：绕开 saf: 只写描述符。
+            // faststart 收尾要回 seek 移数据重写 moov，只写 SAF fd 上不可靠，
+            // 正是"输出校验失败 moov atom not found"的根因
+            val outFile = StorageAccess.writableTarget(this, job.outputUri)
+            if (outFile != null) {
+                val cmd = buildCommand(inParam, outFile.absolutePath, plan, kept, target)
+                val session = runFfmpeg(cmd) { timeMs, speed ->
+                    val p = (timeMs / 1000.0 / durSec).toFloat().coerceIn(0f, 1f)
+                    publishRunning(idx, total, entry.name, p, String.format(Locale.US, "%.1fx", speed))
+                }
+                val rc = session?.returnCode
+                if (rc == null) {
+                    outFile.delete()
+                    return FileResult(entry, plan, Outcome.FAILED, entry.sizeBytes, reason = "ffmpeg 会话异常结束")
+                }
+                if (rc.isValueCancel || TrimController.cancelRequested) {
+                    outFile.delete()
+                    return FileResult(entry, plan, Outcome.CANCELLED, entry.sizeBytes, reason = "已取消（原文件未动）")
+                }
+                if (!rc.isValueSuccess) {
+                    outFile.delete()
+                    return FileResult(entry, plan, Outcome.FAILED, entry.sizeBytes, reason = extractError(session))
+                }
+                val newSize = outFile.length().coerceAtLeast(0)
+                val outProbe = Probe.probeMediaPath(outFile.absolutePath)
+                if (newSize <= 0 || !outProbe.probeOk) {
+                    outFile.delete()
+                    return FileResult(
+                        entry, plan, Outcome.FAILED, entry.sizeBytes,
+                        reason = "输出校验失败（${outProbe.error ?: "空文件"}），请重试"
+                    )
+                }
+                publishRunning(idx + 1, total, entry.name, 1f, "")
+                return FileResult(entry, plan, Outcome.SUCCESS, entry.sizeBytes, newSize, reason = "已另存为新文件")
+            }
+            // ---- SAF 兜底（未授权全部文件权限 / 目标在云盘等特殊 provider） ----
             val outParam = FFmpegKitConfig.getSafParameterForWrite(this, job.outputUri)
             val cmd = buildCommand(inParam, outParam, plan, kept, target)
             val session = runFfmpeg(cmd) { timeMs, speed ->
@@ -291,6 +334,92 @@ class TrimService : Service() {
             outFolder = cutDir
             finalName = "${entry.baseName}.${target.ext}"
         }
+
+        // ---- 直路径管线（已授予全部文件权限且输出目录可定位）----
+        // 普通文件 I/O 写 .part → File 改名替换 → 直路径终检。
+        // 规避 saf: 只写描述符上 faststart 回移数据不可靠导致坏 MP4 的问题。
+        val outDirFile = StorageAccess.accessibleFile(this, outFolder)?.takeIf { it.isDirectory }
+        if (outDirFile != null) {
+            val partFile = File(outDirFile, "$finalName.part")
+            if (partFile.exists()) partFile.delete()
+
+            val cmd = buildCommand(inParam, partFile.absolutePath, plan, kept, target)
+            val session = runFfmpeg(cmd) { timeMs, speed ->
+                val p = (timeMs / 1000.0 / durSec).toFloat().coerceIn(0f, 1f)
+                publishRunning(idx, total, entry.name, p, String.format(Locale.US, "%.1fx", speed))
+            }
+
+            val rc = session?.returnCode
+            if (rc == null) {
+                partFile.delete()
+                return FileResult(entry, plan, Outcome.FAILED, entry.sizeBytes, reason = "ffmpeg 会话异常结束")
+            }
+            if (rc.isValueCancel || TrimController.cancelRequested) {
+                partFile.delete()
+                return FileResult(entry, plan, Outcome.CANCELLED, entry.sizeBytes, reason = "已取消（原文件未动）")
+            }
+            if (!rc.isValueSuccess) {
+                partFile.delete()
+                return FileResult(entry, plan, Outcome.FAILED, entry.sizeBytes, reason = extractError(session))
+            }
+
+            // 成功：替换文件（铁律：备份未做成绝不动原片；最终文件未校验绝不删备份）
+            val partLen = partFile.length().coerceAtLeast(0)
+            val finalFile = File(outDirFile, finalName)
+            val origFile = entry.filePath?.let { File(it) }?.takeIf { it.exists() }
+                ?: File(outDirFile, entry.name)
+            var backupFile: File? = null      // 覆盖模式：原片备份
+            var displacedFile: File? = null   // CutVideos 模式：被顶替的旧成片
+            if (s.overwrite) {
+                if (origFile.exists()) {
+                    backupFile = File(outDirFile, "${entry.baseName}.trimbackup.${System.currentTimeMillis()}")
+                    if (!origFile.renameTo(backupFile)) {
+                        // 备份改名失败：跳过此文件，原片不动（.part 清理）
+                        partFile.delete()
+                        return FileResult(
+                            entry, plan, Outcome.FAILED, entry.sizeBytes,
+                            reason = "无法备份原片（此目录不支持改名），已跳过，原文件未动"
+                        )
+                    }
+                }
+            } else {
+                if (finalFile.exists()) {
+                    displacedFile = File(outDirFile, "$finalName.oldtrim")
+                    if (!finalFile.renameTo(displacedFile)) finalFile.delete()
+                }
+            }
+            if (!partFile.renameTo(finalFile)) {
+                // 回滚：备份/旧成片还原原名，数据完整
+                backupFile?.renameTo(origFile)
+                displacedFile?.renameTo(finalFile)
+                return FileResult(
+                    entry, plan, Outcome.FAILED, entry.sizeBytes,
+                    reason = "输出替换失败（数据完整保留在 ${partFile.name}，可手动改名）"
+                )
+            }
+
+            // 终检一：最终文件字节数必须与 .part 一致；终检二：直路径 ffprobe 必须可解析
+            // （防 moov 缺失等坏文件冒充成功——直路径下 faststart 可靠，此检查退化为兜底）
+            val finalLen = finalFile.length().coerceAtLeast(0)
+            val sizeBad = partLen > 0 && finalLen != partLen
+            val finalProbe = Probe.probeMediaPath(finalFile.absolutePath)
+            if (sizeBad || !finalProbe.probeOk) {
+                finalFile.delete()
+                backupFile?.renameTo(origFile)       // 还原原片
+                displacedFile?.renameTo(finalFile)   // 还原旧成片
+                return FileResult(
+                    entry, plan, Outcome.FAILED, entry.sizeBytes,
+                    reason = "输出校验失败（${finalProbe.error ?: "字节数不一致"}）${if (backupFile != null) "，已回滚为原文件" else ""}，请重试"
+                )
+            }
+            // 校验通过，才允许删除备份与残留
+            backupFile?.delete()
+            displacedFile?.delete()
+            publishRunning(idx + 1, total, entry.name, 1f, "")
+            return FileResult(entry, plan, Outcome.SUCCESS, entry.sizeBytes, finalLen)
+        }
+
+        // ---- SAF 兜底管线（未授权全部文件权限 / 云盘等特殊 provider）----
 
         // 6. 创建 .part 临时文件
         val partName = "$finalName.part"

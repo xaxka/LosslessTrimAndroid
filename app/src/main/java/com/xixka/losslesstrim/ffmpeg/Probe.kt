@@ -169,6 +169,10 @@ object Probe {
     }
 
     suspend fun probeMedia(context: Context, uri: Uri): ProbeResult = withContext(Dispatchers.IO) {
+        // 已授权全部文件权限且能定位到直路径：绕开 saf: 描述符读（更快也更稳）
+        com.xixka.losslesstrim.util.StorageAccess.accessibleFile(context, uri)?.let {
+            return@withContext probeMediaPath(it.absolutePath)
+        }
         try {
             val input = FFmpegKitConfig.getSafParameterForRead(context, uri)
             val outcome = runProbe(
@@ -192,10 +196,37 @@ object Probe {
         }
     }
 
+    /** 按绝对路径探测（直文件 I/O，无 SAF 开销），参数与 [probeMedia] 一致 */
+    suspend fun probeMediaPath(path: String): ProbeResult = withContext(Dispatchers.IO) {
+        try {
+            val outcome = runProbe(
+                "-v error -show_streams -show_format -of json -i \"$path\""
+            )
+            when {
+                outcome.timedOut -> ProbeResult(
+                    probeOk = false,
+                    error = "探测超时（读取过慢或文件损坏），可重试"
+                )
+
+                !outcome.ok || outcome.output.isBlank() -> ProbeResult(
+                    probeOk = false,
+                    error = tailOf(outcome.output.ifBlank { "ffprobe 无输出" }, 200)
+                )
+
+                else -> parseMediaJson(outcome.output)
+            }
+        } catch (e: Exception) {
+            ProbeResult(probeOk = false, error = "探测异常: ${e.message}")
+        }
+    }
+
     suspend fun probeKeyframes(context: Context, uri: Uri): List<Double> = withContext(Dispatchers.IO) {
         keyframeCache[uri.toString()]?.let { return@withContext it }
         try {
-            val input = FFmpegKitConfig.getSafParameterForRead(context, uri)
+            // 已授权全部文件权限时优先直路径读（packet 级扫描更稳更快）
+            val input = com.xixka.losslesstrim.util.StorageAccess
+                .accessibleFile(context, uri)?.absolutePath
+                ?: FFmpegKitConfig.getSafParameterForRead(context, uri)
             // CSV 而非 JSON：长视频全量 packet 输出可达几十 MB，CSV 体积约减半，
             // 且免去 JSONObject 整树解析的内存峰值（这是批处理时 OOM 的主要诱因之一）
             // 输出经磁盘溢写 + 流式解析：整份 CSV 不再驻留内存
