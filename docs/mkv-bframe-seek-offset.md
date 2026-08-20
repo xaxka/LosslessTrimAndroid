@@ -1,8 +1,11 @@
 # MKV(含B帧)无损剪辑：切点早落一个 GOP，字幕/成片时间整体偏移
 
-> 状态（2026-08-20）：**根因已定位并在 stock ffmpeg 4.4.2 / 8.1.2 双版本复现验证**，
+> 状态（2026-08-20 追加）：**已排查"升级 ffmpeg 能否解决"——不能**。9.0.1 实测复现、
+> master 源码确认启发修正原样存在、matroska 仍未设 `AVFMT_SEEK_TO_PTS`、kit 生态
+> 也无可升级目标（详见 §6）。
+> 状态（2026-08-20）：**根因已定位并在 stock ffmpeg 4.4.2 / 8.1.2 / 9.0.1 三版本复现验证**，
 > 修复方案（-ss 补偿 3/23s）已用 8.1.2 命令行验证通过（T3），**代码改动尚未落地**。
-> 明天从 §6 待办继续。
+> 明天从 §8 待办继续。
 
 ## 1. 现象
 
@@ -40,10 +43,11 @@ ffmpeg 对没有 `AVFMT_SEEK_TO_PTS` 标志的封装（matroska 在内，mp4/mov
 | T2 | 8.1.2 | sub_in.mkv (B帧) | 同 T1 但去掉 `-noaccurate_seek` | **与 T1 完全一致** → 该旗标与 bug 无关 |
 | T3 | 8.1.2 | sub_in.mkv (B帧) | `-ss 30.154 -t 29.846`（KF+0.131 补偿） | 起点精确落 30.023 KF；字幕 2.08/8.08/22.08 ✓；时长 30.08 |
 | T4 | 8.1.2 | nb.mkv (`has_b_frames=0`) | `-ss 30.023 -t 29.977`（应用原样） | 起点精确落 30.023（输出 0.000 K）；时长精确 30.000 ✓ |
+| T5 | **9.0.1** | sub_in.mkv (B帧) | `-ss 30.023 -t 29.977`（应用原样） | **与 T1 完全一致**（起点早 1 个 GOP；字幕 4.08/10.08/24.08；时长 32.08）→ 升级无效 |
 
 环境：应用所用 kit `com.antonkarpenko:ffmpeg-kit-min:2.2.2` = **FFmpeg v8.1.1**
-（Maven POM `<name>FFmpeg v8.1.1 Min</name>`）；沙箱用 4.4.2（系统）与
-8.1.2（BtbN 静态构建）双版本复现，行为一致 → **上游行为，非 fork 的锅**。
+（Maven POM `<name>FFmpeg v8.1.1 Min</name>`）；沙箱用 4.4.2（系统）、
+8.1.2 与 9.0.1（BtbN 静态构建）复现，行为一致 → **上游行为，非 fork 的锅**。
 
 ## 4. 根因链条（源码级）
 
@@ -91,8 +95,62 @@ KF 早 2 帧/80ms）→ 全片内容再统一 +0.08s（均匀，无感）。真�
   内部把目标前移。
 - ~~`-avoid_negative_ts make_zero` 造成的 2s 偏移~~：只贡献 80ms 的统一零点平移。
 - ~~输出封装问题~~：输入侧 seek 行为，与输出 mkv/mp4 无关。
+- ~~升级 ffmpeg 版本能解决~~：见 §6，4.4.2 → 9.0.1 → master 全线同样行为。
 
-## 6. 修复方案（T3 已验证，待落地）
+## 6. 升级 ffmpeg 能否解决？——不能（2026-08-20 排查）
+
+**结论：这是上游 ffmpeg 存续多年的既定行为，不是版本回归；升级 ffmpeg（连 master
+都不行）不会改变，且 kit 生态当前也没有可升级的目标。修复只能走 §7 的应用侧补偿。**
+
+### 6.1 版本矩阵实测/源码证据
+
+| 版本 | 证据 | 结果 |
+|------|------|------|
+| 4.4.2（2021） | T1 实测 | 复现 |
+| 8.1.1 | 应用所用 kit（antonkarpenko ffmpeg-kit-min 2.2.2，Maven POM） | 用户原始报告即此版本 |
+| 8.1.2 | T1/T3/T4 实测 | 复现；补偿方案验证通过 |
+| **9.0.1**（最新发布） | **T5 实测**（BtbN n9.0.1，2026-08-20 构建） | **复现，输出与 4.4.2 逐项一致** |
+| master | 源码直查 GitHub | 启发修正原样存在（见 6.2） |
+
+### 6.2 master 源码确认（两处都没动）
+
+1. `fftools/ffmpeg_demux.c`（8.0 起 `ffmpeg_opt.c` 的 demux 逻辑拆到此文件），
+   截至 2026-08-20 master 仍是一字不差的同款修正：
+
+   ```c
+   if (!(ic->iformat->flags & AVFMT_SEEK_TO_PTS)) {
+       int dts_heuristic = 0;
+       for (int i = 0; i < ic->nb_streams; i++) {
+           const AVCodecParameters *par = ic->streams[i]->codecpar;
+           if (par->video_delay) { dts_heuristic = 1; break; }
+       }
+       if (dts_heuristic) {
+           seek_timestamp -= 3*AV_TIME_BASE / 23;
+       }
+   }
+   ```
+
+2. `libavformat/matroskadec.c` master 的 `ff_matroska_demuxer` 结构体
+   **仍不设置 `AVFMT_SEEK_TO_PTS`**（全文件 0 处引用；mp4/mov 的 `mov.c` 有）。
+   也就是说两处触发条件（无标志 + B帧启发修正）在最新开发版全部原样保留。
+
+### 6.3 kit 生态现状（Android 可用的封装）
+
+| kit | 最新版 | ffmpeg | 可升级性 |
+|-----|--------|--------|----------|
+| `com.antonkarpenko:ffmpeg-kit-min`（应用现用） | 2.2.2（2026-07-17，Maven metadata） | 8.1.1 | **无更新** |
+| ffmpegkit-maintained/ffmpeg-kit | `v8.1.7-lts-android`（2026-07-03）等 | 8.1.7 / 7.1.x / 6.0.x | 最新仍是 **8.1 分支**，无 9.x 构建 |
+
+即使将来出现 9.x/更新分支的 kit：由 6.1/6.2，行为也不会变。
+
+### 6.4 对修复方案的推论（重要）
+
+§7 的 `-ss + 0.131s` 补偿**面向未来安全**：若上游某天真移除了启发修正，seek 目标
+（KF+0.131）向后搜索仍命中**同一个关键帧**（下一个 KF 在 +GOP ≥ 0.5s 处，远大于
+0.131s），输出不变。唯一的理论边界是 GOP < 0.131s 的极端流（>7.6 KF/s 的监控类
+视频），此时补偿可能跳到下一个 KF——与 §8.3 稀疏 Cues 同属残余风险项。
+
+## 7. 修复方案（T3 已验证，待落地）
 
 **做法**：对 matroska/webm 输入且视频含 B 帧时，`-ss` 加补偿量，`-t` 同步减。
 
@@ -129,9 +187,9 @@ val ss = plan.actualStart + fudge
 val t = (plan.actualEnd - ss).coerceAtLeast(0.001)
 ```
 
-## 7. 明天待办
+## 8. 明天待办
 
-1. 落地 §6 三处改动，真机回归：`sub_in.mkv` 样例剪辑后期望字幕在 2.08/8.08/22.08。
+1. 落地 §7 三处改动，真机回归：`sub_in.mkv` 样例剪辑后期望字幕在 2.08/8.08/22.08。
 2. 决策：旧缓存 `has_b_frames` 未知（-1）时的策略——上面草稿按"视为有 B 帧"处理
    （matroska 下更安全：无 B 帧误加 fudge 只在 GOP < 131ms 才可能出错，极罕见；
    反向漏加则会稳定复现本 bug）。也可选择强制重探测。
@@ -143,12 +201,16 @@ val t = (plan.actualEnd - ss).coerceAtLeast(0.001)
    TS/AVI 等同样无 `AVFMT_SEEK_TO_PTS` 的输入是否同样补偿（mpegts 无索引走通用
    seek，行为未测，先只对 matroska/webm 生效）。
 6. 回归确认：MP4 输入路径行为不变；mkv→mp4 容器转换（输入侧 seek，补偿同样适用）。
+7. ~~升级 ffmpeg / 换 kit 能否绕过~~：**已排查，不能**（§6，2026-08-20）。不做此项。
 
-## 8. 测试资产与环境（沙箱，可能不保留）
+## 9. 测试资产与环境（沙箱，可能不保留）
 
 - 样例与产物：`/data/user/work/fftest/`（`sub_in.mkv`、`nb.mkv` 无B帧对照组、
-  `subs.srt`、`t1/t2/t3/t4b.mkv`、`chap_in/chap_out.mkv`）。
+  `subs.srt`、`t1/t2/t3/t4b/t5.mkv`、`chap_in/chap_out.mkv`）。
 - ffmpeg 8.1.2 静态构建：`/data/user/work/ff8/ffmpeg-n8.1-latest-linux64-gpl-8.1/bin/`。
+- ffmpeg 9.0.1 静态构建：`/data/user/work/ff9/ffmpeg-n9.0-latest-linux64-gpl-9.0/bin/`。
+- master 源码取证：`fftest/master_demux.c`、`fftest/master_matroskadec.c`
+  （GitHub raw，2026-08-20 拉取）。
 - 复现（T1）：`ffmpeg -hide_banner -y -ss 30.023 -noaccurate_seek -i sub_in.mkv -t 29.977 -map 0:0 -map 0:1 -map 0:2 -c copy -map_metadata 0 -avoid_negative_ts make_zero -f matroska t1.mkv`
 - 验证字幕位置：`ffprobe -v error -select_streams s:0 -show_entries packet=pts_time -of csv=p=0 t1.mkv`
 - 验证起点：`ffprobe -v error -select_streams v:0 -show_entries packet=pts_time,flags -of csv=p=0 t1.mkv | head`
