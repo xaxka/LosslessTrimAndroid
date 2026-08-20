@@ -124,8 +124,9 @@ object Updater {
                 // 清掉上次残留（旧版本 APK / 未完成的 .part）
                 dir.listFiles()?.forEach { f -> f.delete() }
                 val apk = downloadTo(info, dir)
-                lastReady = State.ReadyToInstall(info, apk)
-                state.value = lastReady
+                val ready = State.ReadyToInstall(info, apk)
+                lastReady = ready
+                state.value = ready
             } catch (e: CancellationException) {
                 // 用户取消：回到"发现新版本"，可重新下载
                 state.value = State.Available(info)
