@@ -26,8 +26,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * 无法复用，重扫一遍等于再赌一次运气。持久化后：首次成功探测即落库，
  * 之后任何会话（含重启后）按 uri + 大小 + 修改时间 命中即秒回。
  *
- * 陈旧防护：文件大小或修改时间与入库时不一致视为失效（文件被改过），
- * 返回 miss 走实时探测。缓存层任何异常都只影响提速、不影响功能：
+ * 陈旧防护（双重）：文件大小或修改时间与入库时不一致视为失效（文件被改过）；
+ * 入库超过 [ProbeStore.CACHE_TTL_MS]（24 小时）视为过期，重新解析——
+ * 一天内不重复解析，一天后自然刷新。
+ * 缓存层任何异常都只影响提速、不影响功能：
  * 全部 IO 走 Dispatchers.IO 且 runCatching 吞掉，绝不向上抛。
  */
 @Entity(tableName = "probe_cache")
@@ -105,17 +107,27 @@ abstract class CacheDb : RoomDatabase() {
 /** 缓存读写门面：调用方不感知 Room，异常全部内吞（缓存层只负责提速） */
 object ProbeStore {
 
-    /** 行保留期：过期行（对应文件大概率已删/已改）每进程清理一次 */
-    private const val RETENTION_MS = 30L * 24 * 60 * 60 * 1000
+    /**
+     * 缓存有效期（24 小时）：入库起一天内命中（且文件大小/修改时间未变）
+     * 直接复用，不重复解析；过期一律重新探测——文件即使没动，一天后也
+     * 重新解析一次，兜底信息（如平台 API 粗粒度结果）与探测逻辑升级的
+     * 修正都能自然刷入。L1 内存缓存（Scanner/Probe 的 LRU）引用同一
+     * 常量做同款时效判定，进程长活也不会绕过时效。
+     */
+    const val CACHE_TTL_MS = 24L * 60 * 60 * 1000
 
     private val pruned = AtomicBoolean(false)
 
-    /** 命中且未陈旧（大小/修改时间一致）才返回结果，否则 null */
+    /** 行是否仍在有效期内 */
+    private fun fresh(updatedAt: Long): Boolean =
+        System.currentTimeMillis() - updatedAt <= CACHE_TTL_MS
+
+    /** 命中且未过期、未陈旧（大小/修改时间一致）才返回结果，否则 null */
     suspend fun loadProbe(context: Context, uri: String, file: File): ProbeResult? =
         withContext(Dispatchers.IO) {
             runCatching {
                 val e = CacheDb.get(context).dao().findProbe(uri) ?: return@runCatching null
-                if (e.sizeBytes != file.length() || e.modifiedMs != file.lastModified()) {
+                if (!fresh(e.updatedAt) || e.sizeBytes != file.length() || e.modifiedMs != file.lastModified()) {
                     null
                 } else {
                     ProbeResult(
@@ -148,12 +160,12 @@ object ProbeStore {
         }
     }
 
-    /** 命中且未陈旧才返回（升序全量关键帧列表），否则 null */
+    /** 命中且未过期、未陈旧才返回（升序全量关键帧列表），否则 null */
     suspend fun loadKeyframes(context: Context, uri: String, file: File): List<Double>? =
         withContext(Dispatchers.IO) {
             runCatching {
                 val e = CacheDb.get(context).dao().findKeyframes(uri) ?: return@runCatching null
-                if (e.sizeBytes != file.length() || e.modifiedMs != file.lastModified()) {
+                if (!fresh(e.updatedAt) || e.sizeBytes != file.length() || e.modifiedMs != file.lastModified()) {
                     null
                 } else {
                     kfsFromJson(e.keyframesJson).takeIf { it.isNotEmpty() }
@@ -180,7 +192,8 @@ object ProbeStore {
     private suspend fun pruneOnce(context: Context) {
         if (!pruned.compareAndSet(false, true)) return
         runCatching {
-            val threshold = System.currentTimeMillis() - RETENTION_MS
+            // 过期行已不可能命中（TTL 判定在前），清掉防止无限累积；每进程一次
+            val threshold = System.currentTimeMillis() - CACHE_TTL_MS
             CacheDb.get(context).dao().pruneProbe(threshold)
             CacheDb.get(context).dao().pruneKeyframes(threshold)
         }

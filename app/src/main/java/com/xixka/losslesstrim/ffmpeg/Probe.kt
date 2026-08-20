@@ -76,10 +76,13 @@ object Probe {
         Thread(r, "probe-watchdog").apply { isDaemon = true }
     }
 
+    /** L1 条目：结果 + 入缓时间（超 [ProbeStore.CACHE_TTL_MS] 过期，与 L2 同款时效） */
+    private class CachedKfs(val kfs: List<Double>, val at: Long)
+
     /** 关键帧缓存（uri string → 升序关键帧时间列表，仅全量扫描），L1 + L2 见类注释 */
     private val keyframeCache = Collections.synchronizedMap(
-        object : LinkedHashMap<String, List<Double>>(16, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<Double>>?): Boolean =
+        object : LinkedHashMap<String, CachedKfs>(16, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedKfs>?): Boolean =
                 size > KEYFRAME_CACHE_MAX
         }
     )
@@ -369,15 +372,17 @@ object Probe {
         else -> mime.substringAfter('/')
     }
 
-    /** 关键帧全量扫描（L1/L2 缓存优先；仅直路径，SAF 通道已移除） */
+    /** 关键帧全量扫描（L1/L2 缓存优先，均按 24 小时时效判定；仅直路径，SAF 通道已移除） */
     suspend fun probeKeyframes(context: Context, uri: Uri): List<Double> = withContext(Dispatchers.IO) {
         val key = uri.toString()
-        keyframeCache[key]?.let { return@withContext it }
+        val now = System.currentTimeMillis()
+        keyframeCache[key]?.takeIf { now - it.at <= ProbeStore.CACHE_TTL_MS }
+            ?.let { return@withContext it.kfs }
         val file = com.xixka.losslesstrim.util.StorageAccess
             .accessibleFile(context, uri) ?: return@withContext emptyList()
         // L2：Room 持久缓存（全量扫描成本高，跨重启复用收益最大）
         ProbeStore.loadKeyframes(context, key, file)?.let {
-            keyframeCache[key] = it
+            keyframeCache[key] = CachedKfs(it, now)
             return@withContext it
         }
         try {
@@ -395,7 +400,7 @@ object Probe {
             if (ok) {
                 // 仅成功结果写缓存；失败不缓存，避免同一文件整个进程周期内都无法重试对齐
                 kfs.sort()
-                keyframeCache[key] = kfs
+                keyframeCache[key] = CachedKfs(kfs, now)
                 ProbeStore.saveKeyframes(context, key, file, kfs)
                 kfs
             } else {

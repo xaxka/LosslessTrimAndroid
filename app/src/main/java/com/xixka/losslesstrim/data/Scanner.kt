@@ -54,9 +54,12 @@ object Scanner {
      * 探测结果缓存：uri + 大小 + 修改时间 未变 → 视为同一文件直接复用。
      * 仅缓存成功结果；失败的（可能因串扰/超时误伤）重扫时重新探测。
      */
+    /** L1 条目：结果 + 入缓时间（超 [ProbeStore.CACHE_TTL_MS] 过期，与 L2 同款时效） */
+    private class CachedProbe(val result: ProbeResult, val at: Long)
+
     private val probeCache = Collections.synchronizedMap(
-        object : LinkedHashMap<ProbeKey, ProbeResult>(32, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<ProbeKey, ProbeResult>?): Boolean =
+        object : LinkedHashMap<ProbeKey, CachedProbe>(32, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<ProbeKey, CachedProbe>?): Boolean =
                 size > PROBE_CACHE_MAX
         }
     )
@@ -140,7 +143,8 @@ object Scanner {
     /**
      * 带缓存的探测（直路径）：缓存键用 docUri，跨会话身份稳定。
      * 两级：L1 进程内存 LRU（同一会话重扫秒回）→ L2 Room 持久库（跨进程
-     * 重启有效，uri + 大小 + mtime 未变即命中）→ 实时探测（成功回填两级）。
+     * 重启有效）→ 实时探测（成功回填两级）。两级均按 24 小时时效判定
+     * （[ProbeStore.CACHE_TTL_MS]）：一天内不重复解析，过期重新探测。
      */
     private suspend fun probeCached(context: Context, docUri: Uri, file: File): ProbeResult {
         val key = ProbeKey(
@@ -148,14 +152,16 @@ object Scanner {
             size = file.length(),
             modified = file.lastModified(),
         )
-        probeCache[key]?.let { return it }
+        val now = System.currentTimeMillis()
+        probeCache[key]?.takeIf { now - it.at <= ProbeStore.CACHE_TTL_MS }
+            ?.let { return it.result }
         ProbeStore.loadProbe(context, key.uri, file)?.let {
-            probeCache[key] = it
+            probeCache[key] = CachedProbe(it, now)
             return it
         }
         val probe = Probe.probeMediaPath(file.absolutePath)
         if (probe.probeOk) {
-            probeCache[key] = probe
+            probeCache[key] = CachedProbe(probe, now)
             ProbeStore.saveProbe(context, key.uri, file, probe)
         }
         return probe
