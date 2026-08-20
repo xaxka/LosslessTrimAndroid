@@ -2,8 +2,12 @@ package com.xixka.losslesstrim.ffmpeg
 
 import com.antonkarpenko.ffmpegkit.FFmpegKitConfig
 import com.antonkarpenko.ffmpegkit.Statistics
+import java.io.BufferedWriter
+import java.io.File
+import java.io.FileWriter
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * ffmpeg-kit 会话输出桥。
@@ -15,21 +19,43 @@ import java.util.concurrent.ConcurrentHashMap
  * 822 字符处突然结束）、剪辑进度回调冻结、失败原因日志残缺。
  *
  * 方案：注册**全局** Log/Statistics 回调（它们的调用不经过会话历史查找，一定会触发），
- * 按 sessionId 路由到进程内缓冲。只有显式 begin() 过的会话才会被记录，其余会话
- * 零开销、零驻留；采集完立即取走释放，不持有已结束会话的任何数据。
+ * 按 sessionId 路由到进程内缓冲。只有显式 begin 过的会话才会被记录，其余会话
+ * 零开销、零驻留。
+ *
+ * 两种采集模式（大输出走磁盘，防 OOM）：
+ *  - 内存模式 beginLogs：小输出（媒体 JSON，KB 级）直接进 StringBuilder；
+ *  - 磁盘模式 beginSpill：大输出（关键帧 packet CSV，长视频几十 MB）边收边
+ *    写 cacheDir 临时文件，消费方从磁盘流式读取，内存峰值只剩解析结果本身。
  */
 object SessionBridge {
+
+    /** doneLogs 总字节预算（ffmpeg 会话日志仅供 extractError 取尾部几行） */
+    private const val DONE_MAX_TOTAL_CHARS = 4 * 1024 * 1024
+
+    /** 单条定格日志上限（字符）：只保留尾部——错误提取只看最后几行 */
+    private const val DONE_MAX_ENTRY_CHARS = 256 * 1024
+
+    /** 磁盘溢写临时文件的保留期：进程被杀遗留的残文件按此清理 */
+    private const val SPILL_MAX_AGE_MS = 24 * 60 * 60 * 1000L
 
     /** 正在采集日志的会话：sessionId → 输出缓冲（仅执行线程写入） */
     private val logBuffers = ConcurrentHashMap<Long, StringBuilder>()
 
+    /** 正在磁盘溢写的会话：sessionId → 溢写句柄 */
+    private val spills = ConcurrentHashMap<Long, Spill>()
+
     /** 已结束、日志已定格待消费的会话（ffmpeg 完成回调先于 extractError 消费） */
+    private val doneBytes = AtomicLong(0)
+
     private val doneLogs: MutableMap<Long, String> = Collections.synchronizedMap(
         object : LinkedHashMap<Long, String>(16, 0.75f, true) {
-            // 上限防泄漏：成功路径的会话无人消费（extractError 仅失败时取），
-            // 长批量任务下不能让定格日志无限积压；32 条绰绰有余（串行队列）
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, String>?): Boolean =
-                size > 32
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, String>?): Boolean {
+                val over = doneBytes.get() > DONE_MAX_TOTAL_CHARS && size > 1
+                if (over && eldest != null) {
+                    doneBytes.addAndGet(-eldest.value.length.toLong())
+                }
+                return over
+            }
         }
     )
 
@@ -45,7 +71,15 @@ object SessionBridge {
         synchronized(this) {
             if (initialized) return
             FFmpegKitConfig.enableLogCallback { log ->
-                logBuffers[log.sessionId]?.append(log.message)
+                val id = log.sessionId
+                logBuffers[id]?.append(log.message)
+                spills[id]?.let { s ->
+                    try {
+                        s.writer.write(log.message)
+                    } catch (e: Exception) {
+                        s.failed = true
+                    }
+                }
             }
             FFmpegKitConfig.enableStatisticsCallback { stat: Statistics ->
                 statHandlers[stat.sessionId]?.invoke(stat.time, stat.speed)
@@ -54,24 +88,75 @@ object SessionBridge {
         }
     }
 
-    /** 开始采集该会话日志（重复 begin 视为重置） */
+    /** 开始内存采集该会话日志（重复 begin 视为重置） */
     fun beginLogs(sessionId: Long) {
         logBuffers[sessionId] = StringBuilder()
     }
 
     /**
-     * 结束采集并返回完整日志。会话已结束后再飘来的零星日志直接丢弃。
-     * 结果同时暂存于 doneLogs，供完成回调之后才消费日志的场景（如 extractError）。
+     * 结束内存采集并返回完整日志。
+     * retain=true 时按字节预算定格到 doneLogs（供完成回调之后才消费的场景，如
+     * extractError；单条只保尾部、总量封顶，防巨型日志积压）；探测类输出立即
+     * 消费，retain=false 即取即弃。
      */
-    fun endLogs(sessionId: Long): String {
+    fun endLogs(sessionId: Long, retain: Boolean = true): String {
         val sb = logBuffers.remove(sessionId) ?: return ""
         val out = sb.toString()
-        doneLogs[sessionId] = out
+        if (retain) {
+            val kept = if (out.length > DONE_MAX_ENTRY_CHARS) {
+                out.substring(out.length - DONE_MAX_ENTRY_CHARS)
+            } else out
+            synchronized(doneLogs) {
+                doneLogs.remove(sessionId)?.let { old ->
+                    doneBytes.addAndGet(-old.length.toLong())
+                }
+                doneBytes.addAndGet(kept.length.toLong())
+                doneLogs[sessionId] = kept
+            }
+        }
         return out
     }
 
     /** 取走已定格的会话日志（无则 null），取后即删 */
-    fun takeDoneLogs(sessionId: Long): String? = doneLogs.remove(sessionId)
+    fun takeDoneLogs(sessionId: Long): String? = synchronized(doneLogs) {
+        doneLogs.remove(sessionId)?.also {
+            doneBytes.addAndGet(-it.length.toLong())
+        }
+    }
+
+    /**
+     * 开始磁盘溢写：日志边收边写入 dir 下的临时文件（内存模式返回 null 表示磁盘
+     * 不可用，调用方应退回内存模式）。同一时刻每会话只占用一个临时文件。
+     */
+    fun beginSpill(sessionId: Long, dir: File): Spill? {
+        return try {
+            if (!dir.exists()) dir.mkdirs()
+            // 顺手清理上次进程被杀遗留的残文件（>24h 的）
+            dir.listFiles()?.forEach { f ->
+                if (f.isFile && System.currentTimeMillis() - f.lastModified() > SPILL_MAX_AGE_MS) {
+                    try { f.delete() } catch (_: Exception) {}
+                }
+            }
+            val file = File(dir, "probe_$sessionId.csv")
+            val spill = Spill(file, BufferedWriter(FileWriter(file)))
+            spills[sessionId] = spill
+            spill
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** 结束磁盘溢写（关闭句柄）；返回句柄供消费，未开始过则 null */
+    fun endSpill(sessionId: Long): Spill? {
+        val s = spills.remove(sessionId) ?: return null
+        try {
+            s.writer.flush()
+            s.writer.close()
+        } catch (e: Exception) {
+            s.failed = true
+        }
+        return s
+    }
 
     /** 登记进度统计处理器 */
     fun beginStats(sessionId: Long, handler: (timeMs: Double, speed: Double) -> Unit) {
@@ -86,7 +171,24 @@ object SessionBridge {
     /** 彻底清理该会话的全部痕迹（取消/异常路径防泄漏） */
     fun cleanup(sessionId: Long) {
         logBuffers.remove(sessionId)
-        doneLogs.remove(sessionId)
+        doneLogs.remove(sessionId)?.let { doneBytes.addAndGet(-it.length.toLong()) }
         statHandlers.remove(sessionId)
+        spills.remove(sessionId)?.let { s ->
+            try { s.writer.close() } catch (_: Exception) {}
+            s.delete()
+        }
+    }
+
+    /** 磁盘溢写句柄：failed 置位表示写入中途出错，内容不可信 */
+    class Spill internal constructor(val file: File, internal val writer: BufferedWriter) {
+        @Volatile
+        internal var failed = false
+
+        fun delete() {
+            try {
+                file.delete()
+            } catch (_: Exception) {
+            }
+        }
     }
 }

@@ -9,6 +9,9 @@ import com.xixka.losslesstrim.data.StreamInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.io.File
+import java.io.Reader
+import java.io.StringReader
 import java.util.Collections
 
 /**
@@ -29,10 +32,11 @@ object Probe {
     )
 
     /**
-     * 同步执行 ffprobe 并取回**完整**输出。
+     * 同步执行 ffprobe 并取回**完整**输出（内存模式，适合小输出）。
      * 输出经 SessionBridge 的全局回调采集，不依赖 ffmpeg-kit 会话历史：
      * 修复并发扫描时正在运行的会话被挤出历史（history=2）导致输出被截断、
      * JSON 在半途突然结束（"End of input at character NNN"）的问题。
+     * retain=false：探测输出立即消费，不驻留 doneLogs（防多份大输出积压）。
      */
     private fun runProbe(cmd: String): Pair<Boolean, String> {
         SessionBridge.init()
@@ -42,10 +46,48 @@ object Probe {
         try {
             FFmpegKitConfig.ffprobeExecute(session)
         } finally {
-            output = SessionBridge.endLogs(session.sessionId)
+            output = SessionBridge.endLogs(session.sessionId, retain = false)
         }
         val rc = session.returnCode
         return (rc != null && rc.isValueSuccess) to output
+    }
+
+    /**
+     * 同步执行 ffprobe，输出经 SessionBridge 磁盘溢写（cacheDir 临时文件），
+     * 再流式逐行交给 [consume]——全程不把整份输出驻留内存。
+     * 磁盘防护：packet 级 CSV 对长视频（数小时、多轨）可达几十 MB，旧实现
+     * StringBuilder + toString 双份拷贝瞬时峰值可达几十 MB，是 OOM 诱因；
+     * 溢写后内存峰值只剩解析结果本身。磁盘不可用时退回内存模式（降级不失效）。
+     * 返回 false = 探测失败或溢写损坏，调用方按失败处理。
+     */
+    private fun runProbeToDisk(cmd: String, spillDir: File, consume: (Reader) -> Unit): Boolean {
+        SessionBridge.init()
+        val session = FFprobeSession.create(FFmpegKitConfig.parseArguments(cmd))
+        val spill = SessionBridge.beginSpill(session.sessionId, spillDir)
+        if (spill == null) {
+            // 磁盘不可用（极端情况）：内存兜底，行为与旧实现一致
+            val (ok, output) = runProbe(cmd)
+            if (!ok) return false
+            consume(StringReader(output))
+            return true
+        }
+        var ok = false
+        try {
+            FFmpegKitConfig.ffprobeExecute(session)
+            val rc = session.returnCode
+            // 先结束溢写（flush + close）再读，避免漏掉缓冲区尾部
+            SessionBridge.endSpill(session.sessionId)
+            if (rc != null && rc.isValueSuccess && !spill.failed) {
+                spill.file.bufferedReader().use { consume(it) }
+                ok = true
+            }
+        } catch (e: Exception) {
+            ok = false
+        } finally {
+            SessionBridge.endSpill(session.sessionId)   // 幂等：已结束则 no-op
+            spill.delete()
+        }
+        return ok
     }
 
     suspend fun probeMedia(context: Context, uri: Uri): ProbeResult = withContext(Dispatchers.IO) {
@@ -72,14 +114,20 @@ object Probe {
             val input = FFmpegKitConfig.getSafParameterForRead(context, uri)
             // CSV 而非 JSON：长视频全量 packet 输出可达几十 MB，CSV 体积约减半，
             // 且免去 JSONObject 整树解析的内存峰值（这是批处理时 OOM 的主要诱因之一）
-            val (ok, output) = runProbe(
-                "-v error -select_streams v:0 -show_entries packet=pts_time,flags -of csv=p=0 -i \"$input\""
-            )
-            if (ok && output.isNotBlank()) {
+            // 输出经磁盘溢写 + 流式解析：整份 CSV 不再驻留内存
+            val spillDir = File(context.cacheDir, "probe-spill")
+            val kfs = ArrayList<Double>()
+            val ok = runProbeToDisk(
+                "-v error -select_streams v:0 -show_entries packet=pts_time,flags -of csv=p=0 -i \"$input\"",
+                spillDir,
+            ) { reader ->
+                reader.forEachLine { line -> parseKeyframeLine(line, kfs) }
+            }
+            if (ok) {
                 // 仅成功结果写入缓存；失败不缓存，避免同一文件整个进程周期内都无法重试对齐
-                val parsed = parseKeyframeCsv(output)
-                keyframeCache[uri.toString()] = parsed
-                parsed
+                kfs.sort()
+                keyframeCache[uri.toString()] = kfs
+                kfs
             } else {
                 emptyList()
             }
@@ -135,25 +183,20 @@ object Probe {
     }
 
     /**
-     * 解析 `-show_entries packet=pts_time,flags -of csv=p=0` 的逐行输出：
+     * 解析 `-show_entries packet=pts_time,flags -of csv=p=0` 的单行输出：
      * p=0 时形如 `0.000000,__K`（部分版本会带 `packet,` 前缀），
      * 末列 flags 含 K 即关键帧；在前面各列里取第一个可解析的时间。
      * 容错：跳过乱入的错误日志行与 pts_time 缺失的行。
      */
-    private fun parseKeyframeCsv(csv: String): List<Double> {
-        val kfs = ArrayList<Double>()
-        for (line in csv.lineSequence()) {
-            if (line.isEmpty()) continue
-            val parts = line.split(',')
-            if (parts.size < 2) continue
-            val flags = parts.last().trim()
-            if (!flags.contains('K')) continue
-            val t = parts.dropLast(1)
-                .firstNotNullOfOrNull { it.trim().toDoubleOrNull() }
-            if (t != null && t >= 0) kfs.add(t)
-        }
-        kfs.sort()
-        return kfs
+    private fun parseKeyframeLine(line: String, out: MutableList<Double>) {
+        if (line.isEmpty()) return
+        val parts = line.split(',')
+        if (parts.size < 2) return
+        val flags = parts.last().trim()
+        if (!flags.contains('K')) return
+        val t = parts.dropLast(1)
+            .firstNotNullOfOrNull { it.trim().toDoubleOrNull() }
+        if (t != null && t >= 0) out.add(t)
     }
 
     private fun tailOf(text: String, max: Int): String {
