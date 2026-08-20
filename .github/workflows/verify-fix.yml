@@ -28,10 +28,13 @@ jobs:
           chmod +x gradlew
           ./gradlew testDebugUnitTest --no-daemon --stacktrace
 
-      # ---- E2E：runner 自带 ffmpeg 复现文档测试矩阵 ----
+      # ---- E2E：复现文档测试矩阵 ----
       # 样例A：aac（start_time=-23ms，AAC priming）样例B：pcm（start_time=0）。
       # 每样例跑 T1（无补偿 → bug 应复现：字幕 ~4s）和 T3（补偿后 → 字幕 ~2s
       # 且首包为关键帧）。补偿量按 App 公式 fudge = 0.131 + max(0,-start_time)。
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
       - name: E2E reproduce and verify compensation
         shell: bash
         run: |
