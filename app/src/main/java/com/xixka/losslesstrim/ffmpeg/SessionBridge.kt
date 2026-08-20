@@ -116,6 +116,10 @@ object SessionBridge {
         logBuffers[sessionId] = StringBuilder()
     }
 
+    /** 当前内存采集缓冲的长度（未在采集返回 -1）：日志排水采样用 */
+    fun logLength(sessionId: Long): Long =
+        logBuffers[sessionId]?.length?.toLong() ?: -1L
+
     /**
      * 结束内存采集并返回完整日志。
      * retain=true 时按字节预算定格到 doneLogs（供完成回调之后才消费的场景，如

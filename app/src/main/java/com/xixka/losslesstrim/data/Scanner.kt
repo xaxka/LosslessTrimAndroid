@@ -80,7 +80,7 @@ object Scanner {
                 emptyList(), emptyList(),
                 error = "所选目录无法定位为本地存储路径（云盘/特殊位置不支持），请选择本机或 SD 卡目录"
             )
-        scanWithFileApi(treeUri, root, onProgress)
+        scanWithFileApi(context, treeUri, root, onProgress)
             ?: ScanResult(
                 emptyList(), emptyList(),
                 error = "目录读取失败（存储离线或权限异常），请重新选择文件夹"
@@ -93,6 +93,7 @@ object Scanner {
      * 而不是丢弃部分条目或身份错位）。
      */
     private suspend fun scanWithFileApi(
+        context: Context,
         treeUri: Uri,
         rootDir: File,
         onProgress: (ScanProgress) -> Unit,
@@ -119,7 +120,7 @@ object Scanner {
             val file = files[i]
             onProgress(ScanProgress(parsed = i, total = total, current = file.name))
             val docUri = StorageAccess.buildChildUri(treeUri, file) ?: return null
-            val probe = probeCached(docUri, file)
+            val probe = probeCached(context, docUri, file)
             entries.add(
                 VideoEntry(
                     treeUri = treeUri,
@@ -136,16 +137,27 @@ object Scanner {
         return ScanResult(entries, orphans.sorted())
     }
 
-    /** 带缓存的探测（直路径）：缓存键用 docUri，跨会话身份稳定 */
-    private suspend fun probeCached(docUri: Uri, file: File): ProbeResult {
+    /**
+     * 带缓存的探测（直路径）：缓存键用 docUri，跨会话身份稳定。
+     * 两级：L1 进程内存 LRU（同一会话重扫秒回）→ L2 Room 持久库（跨进程
+     * 重启有效，uri + 大小 + mtime 未变即命中）→ 实时探测（成功回填两级）。
+     */
+    private suspend fun probeCached(context: Context, docUri: Uri, file: File): ProbeResult {
         val key = ProbeKey(
             uri = docUri.toString(),
             size = file.length(),
             modified = file.lastModified(),
         )
         probeCache[key]?.let { return it }
+        ProbeStore.loadProbe(context, key.uri, file)?.let {
+            probeCache[key] = it
+            return it
+        }
         val probe = Probe.probeMediaPath(file.absolutePath)
-        if (probe.probeOk) probeCache[key] = probe
+        if (probe.probeOk) {
+            probeCache[key] = probe
+            ProbeStore.saveProbe(context, key.uri, file, probe)
+        }
         return probe
     }
 }

@@ -5,6 +5,7 @@ import java.time.format.DateTimeFormatter
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("com.google.devtools.ksp")
 }
 
 // 版本号规则（Asia/Shanghai 时区，按构建时刻生成）：
@@ -93,4 +94,9 @@ dependencies {
 
     // ffmpeg-kit 社区维护版 fork（ffmpeg-kit 官方已归档），仅含 demux/mux + stream copy 所需
     implementation("com.antonkarpenko:ffmpeg-kit-min:2.2.2")
+
+    // Room：探测结果/关键帧持久缓存（进程重启后免重扫，详见 data/CacheDb.kt）
+    implementation("androidx.room:room-runtime:2.6.1")
+    implementation("androidx.room:room-ktx:2.6.1")
+    ksp("androidx.room:room-compiler:2.6.1")
 }
