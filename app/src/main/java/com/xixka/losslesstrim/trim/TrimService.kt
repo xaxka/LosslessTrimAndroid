@@ -5,11 +5,14 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ContentUris
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
+import android.provider.MediaStore
 import androidx.core.app.NotificationCompat
 import com.antonkarpenko.ffmpegkit.FFmpegKit
 import com.antonkarpenko.ffmpegkit.FFmpegKitConfig
@@ -302,6 +305,7 @@ class TrimService : Service() {
                 )
             }
             publishRunning(idx + 1, total, entry.name, 1f, "")
+            refreshMediaStore(outFile.absolutePath)
             return FileResult(entry, plan, Outcome.SUCCESS, entry.sizeBytes, newSize, reason = "已另存为新文件")
         }
 
@@ -406,6 +410,10 @@ class TrimService : Service() {
         // 校验通过，才允许删除备份与残留
         backupFile?.delete()
         displacedFile?.delete()
+        // 刷新 MediaStore：同路径改名替换绕过了媒体库，相册/播放器否则仍按
+        // 旧条目显示旧时间轴；覆盖 + 容器转换时旧扩展名路径已不存在，清残留行
+        if (s.overwrite) refreshMediaStore(finalFile.absolutePath, origFile.absolutePath)
+        else refreshMediaStore(finalFile.absolutePath)
         publishRunning(idx + 1, total, entry.name, 1f, "")
         return FileResult(entry, plan, Outcome.SUCCESS, entry.sizeBytes, finalLen)
     }
@@ -417,6 +425,46 @@ class TrimService : Service() {
             dir.isDirectory -> dir
             dir.mkdir() || dir.mkdirs() -> dir
             else -> null
+        }
+    }
+
+    /**
+     * 剪辑落盘后刷新 MediaStore。覆盖模式成品与原片**同路径**（File 改名替换），
+     * 全程绕过 MediaStore——系统相册/播放器读到的仍是旧条目（旧时长、旧缩略图），
+     * 表现为"切完还显示原来的时间轴"。对仍存在的路径触发媒体扫描让元数据归位；
+     * 已不存在的路径（容器转换换扩展名后原文件被改名走）顺手清残留行。
+     */
+    private fun refreshMediaStore(vararg paths: String) {
+        val existing = paths.filter { File(it).exists() }.distinct()
+        if (existing.isNotEmpty()) {
+            try {
+                MediaScannerConnection.scanFile(this, existing.toTypedArray(), null, null)
+            } catch (_: Exception) {
+            }
+        }
+        for (p in paths.filterNot { File(it).exists() }) removeStaleMediaRow(p)
+    }
+
+    /** 清掉指向已不存在文件的 MediaStore 残留行（API 29+；尽力而为，失败不影响剪辑结果） */
+    private fun removeStaleMediaRow(path: String) {
+        if (Build.VERSION.SDK_INT < 29) return
+        try {
+            val filesUri = MediaStore.Files.getContentUri("external")
+            val ids = ArrayList<Long>()
+            contentResolver.query(
+                filesUri,
+                arrayOf(MediaStore.MediaColumns._ID),
+                "${MediaStore.MediaColumns.DATA}=?",
+                arrayOf(path),
+                null,
+            )?.use { c ->
+                while (c.moveToNext()) ids.add(c.getLong(0))
+            }
+            // 先收齐再删：避免边遍历边删导致游标窗口失效
+            for (id in ids) {
+                contentResolver.delete(ContentUris.withAppendedId(filesUri, id), null, null)
+            }
+        } catch (_: Exception) {
         }
     }
 

@@ -62,9 +62,15 @@ object ThumbStore {
     @Volatile
     private var diskDirCache: File? = null
 
-    /** 缓存键：同一文件不同时间点分开缓存（timeMs<=0 即首帧缩略图） */
-    fun keyOf(uri: Uri, timeMs: Long = 0L): String =
-        if (timeMs <= 0L) uri.toString() else "$uri@$timeMs"
+    /**
+     * 缓存键：同一文件不同时间点分开缓存（timeMs<=0 即首帧缩略图）。
+     * identity（文件大小等身份串）非空时拼进键：剪辑覆盖后 uri 不变而内容已换，
+     * 不带身份的键会永远命中旧缓存（切了片头封面还是老画面、切点预览抽旧帧）。
+     */
+    fun keyOf(uri: Uri, timeMs: Long = 0L, identity: String? = null): String {
+        val base = if (timeMs <= 0L) uri.toString() else "$uri@$timeMs"
+        return if (identity.isNullOrEmpty()) base else "$base|$identity"
+    }
 
     /** 同步探测：命中内存缓存立即返回（页面返回时秒显示，不闪占位符） */
     fun peek(key: String): Bitmap? = memCache.get(key)

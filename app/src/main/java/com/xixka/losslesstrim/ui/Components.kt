@@ -243,10 +243,10 @@ fun ChoiceField(
 
 /** 视频缩略图（surfaceVariant 占位）；走 ThumbStore 全局缓存，二次进入页面秒出、不重复抽帧 */
 @Composable
-fun VideoThumb(uri: android.net.Uri, modifier: Modifier = Modifier) {
+fun VideoThumb(uri: android.net.Uri, identity: String? = null, modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    val key = remember(uri) { ThumbStore.keyOf(uri) }
-    var bmp by remember(uri) { mutableStateOf(ThumbStore.peek(key)) }
+    val key = remember(uri, identity) { ThumbStore.keyOf(uri, identity = identity) }
+    var bmp by remember(uri, identity) { mutableStateOf(ThumbStore.peek(key)) }
     LaunchedEffect(key) {
         if (bmp == null) {
             // 列表缩略图显示 96x54dp，按最高密度 ~3x 出 288px 宽小图即可
@@ -276,11 +276,11 @@ fun VideoThumb(uri: android.net.Uri, modifier: Modifier = Modifier) {
 
 /** 切点处抽帧预览；走 ThumbStore 缓存（同一时间点不重复抽帧、只出小图，杜绝拖动时内存暴涨） */
 @Composable
-fun FramePreview(uri: android.net.Uri, tSec: Double, label: String, timeLabel: String) {
+fun FramePreview(uri: android.net.Uri, tSec: Double, label: String, timeLabel: String, identity: String? = null) {
     val context = LocalContext.current
     val timeMs = (tSec * 1000.0).roundToLong()
-    val key = remember(uri, timeMs) { ThumbStore.keyOf(uri, timeMs) }
-    var bmp by remember(uri, timeMs) { mutableStateOf(ThumbStore.peek(key)) }
+    val key = remember(uri, timeMs, identity) { ThumbStore.keyOf(uri, timeMs, identity) }
+    var bmp by remember(uri, timeMs, identity) { mutableStateOf(ThumbStore.peek(key)) }
     LaunchedEffect(key) {
         if (bmp == null) {
             // 拖动切点时 tSec 高频变化：先挂起 200ms，跳过中间值只抽最后一帧

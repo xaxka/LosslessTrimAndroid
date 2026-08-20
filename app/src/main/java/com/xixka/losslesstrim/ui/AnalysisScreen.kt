@@ -291,12 +291,14 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                             tSec = plan.actualStart,
                             label = "起点后第 1 帧",
                             timeLabel = Formats.clockMs(plan.actualStart),
+                            identity = entry.sizeBytes.toString(),
                         )
                         FramePreview(
                             uri = entry.docUri,
                             tSec = (plan.actualEnd - 0.2).coerceAtLeast(plan.actualStart),
                             label = "终点前第 1 帧",
                             timeLabel = Formats.clockMs(plan.actualEnd),
+                            identity = entry.sizeBytes.toString(),
                         )
                     }
                 }

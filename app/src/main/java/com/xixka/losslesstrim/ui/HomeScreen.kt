@@ -374,7 +374,7 @@ fun HomeScreen(
                                     .padding(vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                VideoThumb(e.docUri)
+                                VideoThumb(e.docUri, identity = e.sizeBytes.toString())
                                 Spacer(Modifier.padding(6.dp))
                                 Column(Modifier.weight(1f)) {
                                     Text(

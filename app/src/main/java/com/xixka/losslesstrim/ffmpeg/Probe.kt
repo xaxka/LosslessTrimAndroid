@@ -76,8 +76,19 @@ object Probe {
         Thread(r, "probe-watchdog").apply { isDaemon = true }
     }
 
-    /** L1 条目：结果 + 入缓时间（超 [ProbeStore.CACHE_TTL_MS] 过期，与 L2 同款时效） */
-    private class CachedKfs(val kfs: List<Double>, val at: Long)
+    /**
+     * L1 条目：结果 + 入缓时间（超 [ProbeStore.CACHE_TTL_MS] 过期，与 L2 同款时效）
+     * + 文件身份（大小/修改时间）。键只有 uri（邻域条目再拼切点集合）——剪辑覆盖
+     * 后 uri 不变但内容已换，条目必须过身份校验才能复用，否则切完的文件仍按
+     * **旧布局**吐关键帧（分析页时间轴还是切之前的刻度、二次剪辑按已不存在的
+     * 关键帧对齐）。与 L2（ProbeStore）同款双重陈旧防护。
+     */
+    private class CachedKfs(val kfs: List<Double>, val at: Long, val size: Long, val modified: Long)
+
+    /** L1 条目可用：时效内 且 文件大小/修改时间与探测当时一致（文件没被换过） */
+    private fun CachedKfs.validFor(now: Long, file: File): Boolean =
+        now - at <= ProbeStore.CACHE_TTL_MS &&
+                file.length() == size && file.lastModified() == modified
 
     /**
      * 关键帧缓存（uri → 全量扫描结果；`uri@near:切点键` → 邻域窗口结果），
@@ -376,17 +387,17 @@ object Probe {
         else -> mime.substringAfter('/')
     }
 
-    /** 关键帧全量扫描（L1/L2 缓存优先，均按 24 小时时效判定；仅直路径，SAF 通道已移除） */
+    /** 关键帧全量扫描（L1/L2 缓存优先，均按 24 小时时效 + 文件身份判定；仅直路径，SAF 通道已移除） */
     suspend fun probeKeyframes(context: Context, uri: Uri): List<Double> = withContext(Dispatchers.IO) {
         val key = uri.toString()
-        val now = System.currentTimeMillis()
-        keyframeCache[key]?.takeIf { now - it.at <= ProbeStore.CACHE_TTL_MS }
-            ?.let { return@withContext it.kfs }
         val file = com.xixka.losslesstrim.util.StorageAccess
             .accessibleFile(context, uri) ?: return@withContext emptyList()
+        val now = System.currentTimeMillis()
+        keyframeCache[key]?.takeIf { it.validFor(now, file) }
+            ?.let { return@withContext it.kfs }
         // L2：Room 持久缓存（全量扫描成本高，跨重启复用收益最大）
         ProbeStore.loadKeyframes(context, key, file)?.let {
-            keyframeCache[key] = CachedKfs(it, now)
+            keyframeCache[key] = CachedKfs(it, now, file.length(), file.lastModified())
             return@withContext it
         }
         try {
@@ -404,7 +415,7 @@ object Probe {
             if (ok) {
                 // 仅成功结果写缓存；失败不缓存，避免同一文件整个进程周期内都无法重试对齐
                 kfs.sort()
-                keyframeCache[key] = CachedKfs(kfs, now)
+                keyframeCache[key] = CachedKfs(kfs, now, file.length(), file.lastModified())
                 ProbeStore.saveKeyframes(context, key, file, kfs)
                 kfs
             } else {
@@ -445,12 +456,12 @@ object Probe {
         try {
             val clamped = points.map { it.coerceIn(0.0, durSec) }.distinct().sorted()
             val now = System.currentTimeMillis()
-            val fresh = { at: Long -> now - at <= ProbeStore.CACHE_TTL_MS }
 
-            // 缓存层 1：全量关键帧在手 → 超集直接用
-            keyframeCache[key]?.takeIf { fresh(it.at) }?.let { return@withContext it.kfs }
+            // 缓存层 1：全量关键帧在手 → 超集直接用（时效 + 文件身份双重校验：
+            // 覆盖剪辑后 uri 不变但文件已换，旧布局不能冒用）
+            keyframeCache[key]?.takeIf { it.validFor(now, file) }?.let { return@withContext it.kfs }
             ProbeStore.loadKeyframes(context, key, file)?.let {
-                keyframeCache[key] = CachedKfs(it, now)
+                keyframeCache[key] = CachedKfs(it, now, file.length(), file.lastModified())
                 return@withContext it
             }
 
@@ -459,9 +470,9 @@ object Probe {
                 String.format(java.util.Locale.US, "%.3f", it)
             }
             val nearKey = "$key@near:$pointsKey"
-            keyframeCache[nearKey]?.takeIf { fresh(it.at) }?.let { return@withContext it.kfs }
+            keyframeCache[nearKey]?.takeIf { it.validFor(now, file) }?.let { return@withContext it.kfs }
             ProbeStore.loadNearKeyframes(context, key, pointsKey, file)?.let {
-                keyframeCache[nearKey] = CachedKfs(it, now)
+                keyframeCache[nearKey] = CachedKfs(it, now, file.length(), file.lastModified())
                 return@withContext it
             }
 
@@ -502,7 +513,7 @@ object Probe {
             }
             if (!valid) return@withContext probeKeyframes(context, uri)
             // 仅"窗口凑齐对齐所需关键帧"的结果可缓存：验证过的窗口对同切点可安全复用
-            keyframeCache[nearKey] = CachedKfs(sorted, now)
+            keyframeCache[nearKey] = CachedKfs(sorted, now, file.length(), file.lastModified())
             ProbeStore.saveNearKeyframes(context, key, pointsKey, file, sorted)
             sorted
         } catch (e: Exception) {
