@@ -42,7 +42,7 @@ object Probe {
     private suspend fun runProbe(cmd: String): Pair<Boolean, String> {
         SessionBridge.init()
         val session = FFprobeSession.create(FFmpegKitConfig.parseArguments(cmd))
-        SessionBridge.withExecuteLock {
+        return SessionBridge.withExecuteLock {
             runProbeLocked(session)
         }
     }
