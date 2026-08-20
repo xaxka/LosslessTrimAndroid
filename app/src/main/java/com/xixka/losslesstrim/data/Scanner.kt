@@ -7,6 +7,7 @@ import com.xixka.losslesstrim.ffmpeg.Probe
 import com.xixka.losslesstrim.util.StorageAccess
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.Collections
 
 /** 扫描进度：已完成探测的文件数 / 总数 + 当前正在探测的文件名 */
@@ -23,7 +24,13 @@ data class ScanResult(
 )
 
 /**
- * 扫描 SAF 目录下的视频文件并逐个 ffprobe（仅当前目录，不递归子目录）。
+ * 扫描目录下的视频文件并逐个 ffprobe（仅当前目录，不递归子目录）。
+ *
+ * 双管线：已授予"所有文件"权限时优先 File API 直路径扫描——File.list()
+ * 比 SAF 的 DocumentsContract 子文档查询快 1~2 个数量级（大目录/慢存储更明显），
+ * 且条目 docUri 仍按 SAF 同构规则构造（见 StorageAccess.buildChildUri），
+ * 逐文件覆盖参数等以 docUri 为键的状态不受扫描方式影响；未授权或 uri
+ * 构造失败自动退回 DocumentFile/SAF 扫描。
  *
  * 探测顺序执行：ffprobe 会话已在 SessionBridge 执行层全局串行（并发会话的
  * 日志会互相串扰，见 SessionBridge.executeMutex），这里不再 async 并发——
@@ -59,11 +66,24 @@ object Scanner {
         treeUri: Uri,
         onProgress: (ScanProgress) -> Unit = {},
     ): ScanResult = withContext(Dispatchers.IO) {
-        val root = DocumentFile.fromTreeUri(context, treeUri) ?: return@withContext ScanResult(emptyList(), emptyList())
+        // 优先直路径扫描（快 1~2 个数量级）；不可用/构造失败时 null → 走 SAF
+        StorageAccess.treeRootFile(context, treeUri)?.let { root ->
+            scanWithFileApi(treeUri, root, onProgress)?.let { return@withContext it }
+        }
+        scanWithSaf(context, treeUri, onProgress)
+    }
+
+    /** SAF（DocumentFile）扫描管线：未授予全部文件权限 / 云盘目录时使用 */
+    private suspend fun scanWithSaf(
+        context: Context,
+        treeUri: Uri,
+        onProgress: (ScanProgress) -> Unit,
+    ): ScanResult {
+        val root = DocumentFile.fromTreeUri(context, treeUri) ?: return ScanResult(emptyList(), emptyList())
         val files = ArrayList<Pair<DocumentFile, DocumentFile>>() // (file, folder)
         val orphans = ArrayList<String>()
         collectFiles(root, files, orphans)
-        if (files.isEmpty()) return@withContext ScanResult(emptyList(), orphans)
+        if (files.isEmpty()) return ScanResult(emptyList(), orphans)
 
         val total = files.size
         val entries = ArrayList<VideoEntry>(total)
@@ -86,10 +106,60 @@ object Scanner {
             )
         }
         entries.sortBy { it.name.lowercase() }
-        ScanResult(entries, orphans.sorted())
+        return ScanResult(entries, orphans.sorted())
     }
 
-    /** 带缓存的探测：命中（同 uri/大小/修改时间且上次成功）直接复用，否则重新探测 */
+    /**
+     * 直路径（File API）扫描管线。docUri/folderUri 按 SAF 同构规则构造，
+     * 条目身份与 SAF 扫描完全一致；uri 构造失败返回 null（整体退回 SAF，
+     * 而不是丢弃部分条目或身份错位）。文件识别沿用扩展名白名单（File 模式
+     * 无 mime 可查，无扩展名但 mime 为视频的极边缘文件会漏，SAF 模式仍可识别）。
+     */
+    private suspend fun scanWithFileApi(
+        treeUri: Uri,
+        rootDir: File,
+        onProgress: (ScanProgress) -> Unit,
+    ): ScanResult? {
+        val children = rootDir.listFiles() ?: return null
+        val files = ArrayList<File>()
+        val orphans = ArrayList<String>()
+        for (child in children) {
+            if (!child.isFile) continue
+            val name = child.name
+            // 上次闪退/失败遗留的中间文件：提示用户可手动恢复，不参与扫描
+            if (name.endsWith(".part") || name.contains(".trimbackup.") || name.endsWith(".oldtrim")) {
+                orphans.add(name)
+                continue
+            }
+            val ext = name.substringAfterLast('.', "").lowercase()
+            if (ext in VIDEO_EXTS) files.add(child)
+        }
+
+        val folderUri = StorageAccess.buildChildUri(treeUri, rootDir) ?: return null
+        val total = files.size
+        val entries = ArrayList<VideoEntry>(total)
+        for (i in files.indices) {
+            val file = files[i]
+            onProgress(ScanProgress(parsed = i, total = total, current = file.name))
+            val docUri = StorageAccess.buildChildUri(treeUri, file) ?: return null
+            val probe = probeCached(docUri, file)
+            entries.add(
+                VideoEntry(
+                    treeUri = treeUri,
+                    folderUri = folderUri,
+                    docUri = docUri,
+                    name = file.name,
+                    sizeBytes = file.length().coerceAtLeast(0),
+                    probe = probe,
+                    filePath = file.absolutePath,
+                )
+            )
+        }
+        entries.sortBy { it.name.lowercase() }
+        return ScanResult(entries, orphans.sorted())
+    }
+
+    /** 带缓存的探测（SAF）：命中（同 uri/大小/修改时间且上次成功）直接复用，否则重新探测 */
     private suspend fun probeCached(context: Context, file: DocumentFile): ProbeResult {
         val key = ProbeKey(
             uri = file.uri.toString(),
@@ -98,6 +168,19 @@ object Scanner {
         )
         probeCache[key]?.let { return it }
         val probe = Probe.probeMedia(context, file.uri)
+        if (probe.probeOk) probeCache[key] = probe
+        return probe
+    }
+
+    /** 带缓存的探测（直路径）：缓存键仍用 docUri，与 SAF 扫描共享同一缓存身份 */
+    private suspend fun probeCached(docUri: Uri, file: File): ProbeResult {
+        val key = ProbeKey(
+            uri = docUri.toString(),
+            size = file.length(),
+            modified = file.lastModified(),
+        )
+        probeCache[key]?.let { return it }
+        val probe = Probe.probeMediaPath(file.absolutePath)
         if (probe.probeOk) probeCache[key] = probe
         return probe
     }

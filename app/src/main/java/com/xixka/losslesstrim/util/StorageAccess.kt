@@ -68,17 +68,58 @@ object StorageAccess {
                 segs.isNotEmpty() && segs[0] == "tree" -> DocumentsContract.getTreeDocumentId(uri)
                 else -> DocumentsContract.getDocumentId(uri)
             }
-            val sep = docId.indexOf(':')
-            if (sep <= 0) null
-            else {
-                val volume = docId.substring(0, sep)
-                val rel = docId.substring(sep + 1)
-                val root = if (volume == "primary") "/storage/emulated/0" else "/storage/$volume"
-                if (rel.isEmpty()) root else "$root/$rel"
-            }
+            docIdToPath(docId)
         }
     } catch (_: Exception) {
         null
+    }
+
+    /** ExternalStorageProvider 的 docId（形如 "primary:Movies/a.mp4"）→ 绝对路径 */
+    private fun docIdToPath(docId: String): String? {
+        val sep = docId.indexOf(':')
+        if (sep <= 0) return null
+        val volume = docId.substring(0, sep)
+        val rel = docId.substring(sep + 1)
+        val root = if (volume == "primary") "/storage/emulated/0" else "/storage/$volume"
+        return if (rel.isEmpty()) root else "$root/$rel"
+    }
+
+    /** tree uri → 其根目录 File（已授权全部文件权限且为本地存储卷时非空） */
+    fun treeRootFile(context: Context, treeUri: Uri): File? {
+        if (!hasAllFilesAccess(context)) return null
+        if (treeUri.authority != "com.android.externalstorage.documents") return null
+        val docId = try {
+            DocumentsContract.getTreeDocumentId(treeUri)
+        } catch (_: Exception) {
+            return null
+        }
+        return docIdToPath(docId)?.let { File(it) }?.takeIf { it.isDirectory }
+    }
+
+    /**
+     * 树内文件/目录 → 树作用域 document uri（content://.../tree/X/document/Y），
+     * 与 DocumentFile.listFiles 得到的子文档 uri 完全同构。直路径扫描时用它
+     * 构造条目的 docUri/folderUri，保证条目身份（覆盖参数、列表 key 均以
+     * docUri 为键）与 SAF 扫描一致——两种扫描模式互切不丢用户逐文件设置。
+     */
+    fun buildChildUri(treeUri: Uri, file: File): Uri? {
+        return try {
+            val treeDocId = DocumentsContract.getTreeDocumentId(treeUri)
+            val volume = treeDocId.substringBefore(':', "")
+            if (volume.isEmpty()) null
+            else {
+                val volumeRoot = if (volume == "primary") "/storage/emulated/0" else "/storage/$volume"
+                val abs = file.absolutePath
+                val rel = when {
+                    abs == volumeRoot -> ""
+                    abs.startsWith("$volumeRoot/") -> abs.removePrefix("$volumeRoot/")
+                    else -> return null
+                }
+                DocumentsContract.buildDocumentUriUsingTree(treeUri, "$volume:$rel")
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     /** uri 对应的已存在文件/目录（须已具备直接读写能力，否则 null） */
