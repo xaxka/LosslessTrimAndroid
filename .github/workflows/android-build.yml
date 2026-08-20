@@ -43,9 +43,13 @@ jobs:
           echo "BUILT_AT=${BUILT_AT}" >> "$GITHUB_ENV"
           echo "versionName=$VERSION_NAME versionCode=$VERSION_CODE builtAt=$BUILT_AT"
 
-      - name: Build release APK
+      - name: Unit tests
         run: |
           chmod +x gradlew
+          ./gradlew testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Build release APK
+        run: |
           ./gradlew assembleRelease --no-daemon --stacktrace \
             -PversionName="${VERSION_NAME}" -PversionCode="${VERSION_CODE}"
 
