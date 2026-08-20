@@ -90,6 +90,16 @@ fun HomeScreen(
 
     val isSingle = vm.isSingleFile
 
+    // SAF 数据通道已移除：选文件夹/单文件前必须先有"所有文件"权限，
+    // 否则扫描/探测/转码都无法直路径读写——入口处直接拦截引导授权
+    fun launchPicker(pick: () -> Unit) {
+        if (StorageAccess.hasAllFilesAccess(context)) {
+            pick()
+        } else {
+            showAllFilesDialog = true
+        }
+    }
+
     fun startInternal(outputUri: android.net.Uri? = null) {
         if (vm.startBatch(outputUri)) {
             onStartProcessing()
@@ -258,9 +268,9 @@ fun HomeScreen(
                         subtitle = scanMsg ?: "批量处理整个文件夹，或选择单个视频精细编辑",
                         icon = Icons.Default.PlayArrow,
                         buttonText = "选择文件夹（批量）",
-                        onButtonClick = { folderLauncher.launch(null) },
+                        onButtonClick = { launchPicker { folderLauncher.launch(null) } },
                         button2Text = "选择视频文件（单个）",
-                        onButton2Click = { singleLauncher.launch(arrayOf("video/*")) },
+                        onButton2Click = { launchPicker { singleLauncher.launch(arrayOf("video/*")) } },
                     )
                 }
             } else {
@@ -277,8 +287,10 @@ fun HomeScreen(
                         modifier = Modifier.weight(1f),
                     )
                     BlTextButton(onClick = {
-                        if (isSingle) singleLauncher.launch(arrayOf("video/*"))
-                        else folderLauncher.launch(null)
+                        launchPicker {
+                            if (isSingle) singleLauncher.launch(arrayOf("video/*"))
+                            else folderLauncher.launch(null)
+                        }
                     }) { Text(if (isSingle) "重新选择文件" else "更换文件夹") }
                 }
                 if (orphans.isNotEmpty()) {

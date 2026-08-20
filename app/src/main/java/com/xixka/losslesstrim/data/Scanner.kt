@@ -2,7 +2,6 @@ package com.xixka.losslesstrim.data
 
 import android.content.Context
 import android.net.Uri
-import androidx.documentfile.provider.DocumentFile
 import com.xixka.losslesstrim.ffmpeg.Probe
 import com.xixka.losslesstrim.util.StorageAccess
 import kotlinx.coroutines.Dispatchers
@@ -17,20 +16,23 @@ data class ScanProgress(
     val current: String,
 )
 
-/** 扫描结果：视频列表 + 残留中间文件（闪退遗留的备份/临时文件，供恢复提示） */
+/** 扫描结果：视频列表 + 残留中间文件（闪退遗留的备份/临时文件，供恢复提示）+ 致命错误 */
 data class ScanResult(
     val entries: List<VideoEntry>,
     val orphans: List<String>,
+    /** 非空 = 扫描根本无法进行（未授权/目录不可达），UI 直接展示 */
+    val error: String? = null,
 )
 
 /**
  * 扫描目录下的视频文件并逐个 ffprobe（仅当前目录，不递归子目录）。
  *
- * 双管线：已授予"所有文件"权限时优先 File API 直路径扫描——File.list()
- * 比 SAF 的 DocumentsContract 子文档查询快 1~2 个数量级（大目录/慢存储更明显），
- * 且条目 docUri 仍按 SAF 同构规则构造（见 StorageAccess.buildChildUri），
- * 逐文件覆盖参数等以 docUri 为键的状态不受扫描方式影响；未授权或 uri
- * 构造失败自动退回 DocumentFile/SAF 扫描。
+ * 全直路径管线：File.list() 列目录 + 按绝对路径探测。ffmpeg-kit 的 saf:
+ * 描述符读在 fork 上有越界崩溃（"length=11; index=11"）且慢 1~2 个数量级，
+ * 已彻底移除 SAF 数据通道——未授予"所有文件"权限时不再静默降级，直接报错
+ * 引导授权（见 [StorageAccess.hasAllFilesAccess]）。条目 docUri 仍按 SAF
+ * 同构规则构造（[StorageAccess.buildChildUri]），逐文件覆盖参数以 docUri
+ * 为键的状态不受影响。
  *
  * 探测顺序执行：ffprobe 会话已在 SessionBridge 执行层全局串行（并发会话的
  * 日志会互相串扰，见 SessionBridge.executeMutex），这里不再 async 并发——
@@ -66,54 +68,29 @@ object Scanner {
         treeUri: Uri,
         onProgress: (ScanProgress) -> Unit = {},
     ): ScanResult = withContext(Dispatchers.IO) {
-        // 优先直路径扫描（快 1~2 个数量级）；不可用/构造失败时 null → 走 SAF
-        StorageAccess.treeRootFile(context, treeUri)?.let { root ->
-            scanWithFileApi(treeUri, root, onProgress)?.let { return@withContext it }
-        }
-        scanWithSaf(context, treeUri, onProgress)
-    }
-
-    /** SAF（DocumentFile）扫描管线：未授予全部文件权限 / 云盘目录时使用 */
-    private suspend fun scanWithSaf(
-        context: Context,
-        treeUri: Uri,
-        onProgress: (ScanProgress) -> Unit,
-    ): ScanResult {
-        val root = DocumentFile.fromTreeUri(context, treeUri) ?: return ScanResult(emptyList(), emptyList())
-        val files = ArrayList<Pair<DocumentFile, DocumentFile>>() // (file, folder)
-        val orphans = ArrayList<String>()
-        collectFiles(root, files, orphans)
-        if (files.isEmpty()) return ScanResult(emptyList(), orphans)
-
-        val total = files.size
-        val entries = ArrayList<VideoEntry>(total)
-        for (i in files.indices) {
-            val (file, folder) = files[i]
-            val name = file.name ?: file.uri.toString()
-            onProgress(ScanProgress(parsed = i, total = total, current = name))
-            val probe = probeCached(context, file)
-            entries.add(
-                VideoEntry(
-                    treeUri = treeUri,
-                    folderUri = folder.uri,
-                    docUri = file.uri,
-                    name = name,
-                    sizeBytes = if (file.length() > 0) file.length() else 0L,
-                    probe = probe,
-                    // 已授权全部文件权限时记录绝对路径：ffmpeg/ffprobe 改走直路径读写
-                    filePath = StorageAccess.accessibleFile(context, file.uri)?.absolutePath,
-                )
+        // 未授予"所有文件"权限：直路径不可用，SAF 数据通道已移除，直接报错引导授权
+        if (!StorageAccess.hasAllFilesAccess(context)) {
+            return@withContext ScanResult(
+                emptyList(), emptyList(),
+                error = "未授予\u201c所有文件\u201d权限，无法读取文件（SAF 通道已移除，请到设置授权后重试）"
             )
         }
-        entries.sortBy { it.name.lowercase() }
-        return ScanResult(entries, orphans.sorted())
+        val root = StorageAccess.treeRootFile(context, treeUri)
+            ?: return@withContext ScanResult(
+                emptyList(), emptyList(),
+                error = "所选目录无法定位为本地存储路径（云盘/特殊位置不支持），请选择本机或 SD 卡目录"
+            )
+        scanWithFileApi(treeUri, root, onProgress)
+            ?: ScanResult(
+                emptyList(), emptyList(),
+                error = "目录读取失败（存储离线或权限异常），请重新选择文件夹"
+            )
     }
 
     /**
      * 直路径（File API）扫描管线。docUri/folderUri 按 SAF 同构规则构造，
-     * 条目身份与 SAF 扫描完全一致；uri 构造失败返回 null（整体退回 SAF，
-     * 而不是丢弃部分条目或身份错位）。文件识别沿用扩展名白名单（File 模式
-     * 无 mime 可查，无扩展名但 mime 为视频的极边缘文件会漏，SAF 模式仍可识别）。
+     * 条目身份与历史版本完全一致；uri 构造失败返回 null（上层报错提示，
+     * 而不是丢弃部分条目或身份错位）。
      */
     private suspend fun scanWithFileApi(
         treeUri: Uri,
@@ -159,20 +136,7 @@ object Scanner {
         return ScanResult(entries, orphans.sorted())
     }
 
-    /** 带缓存的探测（SAF）：命中（同 uri/大小/修改时间且上次成功）直接复用，否则重新探测 */
-    private suspend fun probeCached(context: Context, file: DocumentFile): ProbeResult {
-        val key = ProbeKey(
-            uri = file.uri.toString(),
-            size = file.length(),
-            modified = file.lastModified(),
-        )
-        probeCache[key]?.let { return it }
-        val probe = Probe.probeMedia(context, file.uri)
-        if (probe.probeOk) probeCache[key] = probe
-        return probe
-    }
-
-    /** 带缓存的探测（直路径）：缓存键仍用 docUri，与 SAF 扫描共享同一缓存身份 */
+    /** 带缓存的探测（直路径）：缓存键用 docUri，跨会话身份稳定 */
     private suspend fun probeCached(docUri: Uri, file: File): ProbeResult {
         val key = ProbeKey(
             uri = docUri.toString(),
@@ -183,30 +147,5 @@ object Scanner {
         val probe = Probe.probeMediaPath(file.absolutePath)
         if (probe.probeOk) probeCache[key] = probe
         return probe
-    }
-
-    private fun collectFiles(
-        folder: DocumentFile,
-        out: ArrayList<Pair<DocumentFile, DocumentFile>>,
-        orphans: ArrayList<String>,
-    ) {
-        val children = folder.listFiles()
-        for (child in children) {
-            if (child.isFile) {
-                val name = child.name ?: continue
-                // 上次闪退/失败遗留的中间文件：提示用户可手动恢复，不参与扫描
-                if (name.endsWith(".part") || name.contains(".trimbackup.") || name.endsWith(".oldtrim")) {
-                    orphans.add(name)
-                    continue
-                }
-                val ext = name.substringAfterLast('.', "").lowercase()
-                val mime = child.type
-                val isVideo = ext in VIDEO_EXTS ||
-                        (mime != null && mime.startsWith("video/", ignoreCase = true))
-                if (isVideo) {
-                    out.add(child to folder)
-                }
-            }
-        }
     }
 }

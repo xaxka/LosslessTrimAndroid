@@ -206,6 +206,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 _files.value = list
                 _orphans.value = result.orphans
                 _scanMsg.value = when {
+                    // 致命错误（未授权/目录不可达）：直接展示，不进入常规统计文案
+                    result.error != null -> result.error
                     list.isEmpty() -> "该文件夹里没有找到视频文件"
                     else -> {
                         val bad = list.count { !it.probe.probeOk }

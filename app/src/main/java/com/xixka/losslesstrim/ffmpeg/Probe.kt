@@ -168,31 +168,22 @@ object Probe {
         return timedOut.get()
     }
 
+    /**
+     * 探测指定 uri 的媒体信息。
+     *
+     * SAF（saf:）数据通道已彻底移除：ffmpeg-kit fork 在其 SAF 参数构造/读取
+     * 路径上存在越界崩溃（"探测异常: length=N; index=N"）与慢速描述符读，
+     * 未授予"所有文件"权限时直接报错引导授权，不再静默降级。
+     */
     suspend fun probeMedia(context: Context, uri: Uri): ProbeResult = withContext(Dispatchers.IO) {
-        // 已授权全部文件权限且能定位到直路径：绕开 saf: 描述符读（更快也更稳）
-        com.xixka.losslesstrim.util.StorageAccess.accessibleFile(context, uri)?.let {
-            return@withContext probeMediaPath(it.absolutePath)
-        }
-        try {
-            val input = FFmpegKitConfig.getSafParameterForRead(context, uri)
-            val outcome = runProbe(
-                "-v error -show_streams -show_format -of json -i \"$input\""
+        val file = com.xixka.losslesstrim.util.StorageAccess.accessibleFile(context, uri)
+        if (file == null) {
+            ProbeResult(
+                probeOk = false,
+                error = "无法定位文件路径（未授予\u201c所有文件\u201d权限或非本地存储），SAF 通道已移除"
             )
-            when {
-                outcome.timedOut -> ProbeResult(
-                    probeOk = false,
-                    error = "探测超时（读取过慢或文件损坏），可重试"
-                )
-
-                !outcome.ok || outcome.output.isBlank() -> ProbeResult(
-                    probeOk = false,
-                    error = tailOf(outcome.output.ifBlank { "ffprobe 无输出" }, 200)
-                )
-
-                else -> parseMediaJson(outcome.output)
-            }
-        } catch (e: Exception) {
-            ProbeResult(probeOk = false, error = "探测异常: ${e.message}")
+        } else {
+            probeMediaPath(file.absolutePath)
         }
     }
 
@@ -223,17 +214,18 @@ object Probe {
     suspend fun probeKeyframes(context: Context, uri: Uri): List<Double> = withContext(Dispatchers.IO) {
         keyframeCache[uri.toString()]?.let { return@withContext it }
         try {
-            // 已授权全部文件权限时优先直路径读（packet 级扫描更稳更快）
-            val input = com.xixka.losslesstrim.util.StorageAccess
+            // SAF 通道已移除：关键帧 packet 级扫描只在直路径上进行（更快更稳）；
+            // 定位失败（未授权/云盘）返回空列表，调用方按"无法对齐关键帧"处理
+            val path = com.xixka.losslesstrim.util.StorageAccess
                 .accessibleFile(context, uri)?.absolutePath
-                ?: FFmpegKitConfig.getSafParameterForRead(context, uri)
+                ?: return@withContext emptyList()
             // CSV 而非 JSON：长视频全量 packet 输出可达几十 MB，CSV 体积约减半，
             // 且免去 JSONObject 整树解析的内存峰值（这是批处理时 OOM 的主要诱因之一）
             // 输出经磁盘溢写 + 流式解析：整份 CSV 不再驻留内存
             val spillDir = File(context.cacheDir, "probe-spill")
             val kfs = ArrayList<Double>()
             val ok = runProbeToDisk(
-                "-v error -select_streams v:0 -show_entries packet=pts_time,flags -of csv=p=0 -i \"$input\"",
+                "-v error -select_streams v:0 -show_entries packet=pts_time,flags -of csv=p=0 -i \"$path\"",
                 spillDir,
             ) { reader ->
                 reader.forEachLine { line -> parseKeyframeLine(line, kfs) }
