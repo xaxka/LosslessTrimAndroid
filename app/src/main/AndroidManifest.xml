@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -7,11 +8,21 @@
     <!-- 应用内检查更新：访问 GitHub API / 下载 APK；拉起安装器装下载好的更新包 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- 直接文件路径读写（优先管线）：SAF(saf: 协议)只写描述符上 -movflags +faststart
+         收尾回移数据不可靠，部分设备产出缺 moov 的坏 MP4。授予"所有文件"权限后
+         ffmpeg 走普通文件 I/O，彻底规避。未授予时自动退回 SAF 流程（功能不失效）。 -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+    <!-- Android 10 及以下：传统外部存储权限（配合 requestLegacyExternalStorage） -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
 
     <application
         android:name=".MainApplication"
         android:allowBackup="true"
         android:largeHeap="true"
+        android:requestLegacyExternalStorage="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:label="@string/app_name"

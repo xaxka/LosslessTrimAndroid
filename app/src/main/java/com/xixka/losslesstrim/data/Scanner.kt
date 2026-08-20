@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import com.xixka.losslesstrim.ffmpeg.Probe
+import com.xixka.losslesstrim.util.StorageAccess
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Collections
@@ -79,6 +80,8 @@ object Scanner {
                     name = name,
                     sizeBytes = if (file.length() > 0) file.length() else 0L,
                     probe = probe,
+                    // 已授权全部文件权限时记录绝对路径：ffmpeg/ffprobe 改走直路径读写
+                    filePath = StorageAccess.accessibleFile(context, file.uri)?.absolutePath,
                 )
             )
         }
