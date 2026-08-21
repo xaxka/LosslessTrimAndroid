@@ -1,9 +1,9 @@
 # 输出时间轴三缺陷：起点非 0 / 结尾超播 / 片头剪丢音频
 
-> 状态（2026-08-20）：**修复已落地（TrimService 四个纯函数 + buildCommand），
-> E2E 矩阵 T1–T4 本地全绿**（ffmpeg 6.1.1-3ubuntu5，与 CI ubuntu-latest apt
-> 安装的版本完全一致；CI 临时 workflow `.github/workflows/verify-timeline.yml`
-> 与本地 `verify-timeline.sh` 同款矩阵，绿后清理，单测 TrimCommandTest 保留）。
+> 状态（2026-08-21）：**修复已落地（main 1d4478c）并经 CI 验证通过**——
+> Verify timeline #1：单测 + E2E 矩阵 T1–T4 全 PASS（ubuntu-latest，
+> ffmpeg 6.1.1-3ubuntu5）；Android CI #66 同提交全绿。临时验证 workflow
+> 已删除，单测 TrimCommandTest 并入 Android CI 常规流程。
 > 前置问题（MKV+B帧 seek 前移一个 GOP）见 [mkv-bframe-seek-offset.md]。
 
 ## 1. 现象
@@ -99,6 +99,9 @@ ffmpeg-kit-min 2.2.2 内置 setts（`libavcodec.so` 导出，已用 strings 验�
 无需钳制。
 
 ## 6. 验证矩阵（T1–T4，全绿）
+
+本地（沙箱 ffmpeg 6.1.1）与 CI（ubuntu-latest apt 同版本）均逐项 PASS，
+关键数值一致：
 
 样例 A `src.mkv`（音视频齐平 + AAC priming→start_time=−0.023 + 末尾
 10.5s 长 cue 字幕）中段剪 30s；样例 B `lead.mkv`（音频超前视频 0.8s +
