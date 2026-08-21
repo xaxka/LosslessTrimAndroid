@@ -252,18 +252,27 @@ object Probe {
      * 未授予"所有文件"权限时直接报错引导授权，不再静默降级。
      */
     suspend fun probeMedia(context: Context, uri: Uri): ProbeResult = withContext(Dispatchers.IO) {
-        val file = com.xixka.losslesstrim.util.StorageAccess.accessibleFile(context, uri)
-        if (file == null) {
+        // 失败原因分两类，提示分开：未授权（可去设置解决）与来源不可解析
+        // （云盘/第三方文件管理器，换"此设备"入口选本机文件）
+        if (!com.xixka.losslesstrim.util.StorageAccess.hasAllFilesAccess(context)) {
             ProbeResult(
                 probeOk = false,
-                error = "无法定位文件路径（未授予\u201c所有文件\u201d权限或非本地存储），SAF 通道已移除"
+                error = "未授予\u201c所有文件\u201d权限（SAF 通道已移除），请到系统设置授权后重试"
             )
         } else {
-            // L2：Room 持久缓存（uri + 大小 + mtime 未变即视为同一文件）
-            ProbeStore.loadProbe(context, uri.toString(), file)?.let { return@withContext it }
-            val result = probeMediaPath(file.absolutePath)
-            if (result.probeOk) ProbeStore.saveProbe(context, uri.toString(), file, result)
-            result
+            val file = com.xixka.losslesstrim.util.StorageAccess.accessibleFile(context, uri)
+            if (file == null) {
+                ProbeResult(
+                    probeOk = false,
+                    error = "无法定位文件路径：该文件不在本机存储（云盘/第三方来源），请在选择器\u201c此设备\u201d中选择本机文件"
+                )
+            } else {
+                // L2：Room 持久缓存（uri + 大小 + mtime 未变即视为同一文件）
+                ProbeStore.loadProbe(context, uri.toString(), file)?.let { return@withContext it }
+                val result = probeMediaPath(file.absolutePath)
+                if (result.probeOk) ProbeStore.saveProbe(context, uri.toString(), file, result)
+                result
+            }
         }
     }
 

@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
+import android.provider.MediaStore
 import android.provider.Settings
 import androidx.core.content.ContextCompat
 import java.io.File
@@ -47,9 +48,37 @@ object StorageAccess {
     )
 
     /**
-     * 本地存储的 SAF document/tree uri → 绝对路径。
-     * 仅识别 ExternalStorageProvider（内置存储/外置 SD 的本地目录），
-     * 云盘等第三方 provider 返回 null。
+     * 本地文件的 uri → 绝对路径（须具备直接读写能力，见 [hasAllFilesAccess]）。
+     *
+     * 支持的 uri 来源（单文件选择器 OpenDocument/CreateDocument 会按入口不同
+     * 返回不同 provider，均指向同一个本机文件，历史上只认 ExternalStorageProvider
+     * 导致"下载"/媒体入口选的本机文件被误判为非本地存储）：
+     *  - file:// 直路径（部分第三方文件管理器）；
+     *  - ExternalStorageProvider（内置存储/外置 SD，从"此设备"浏览选择）；
+     *  - DownloadsProvider（选择器左侧"下载"入口）；
+     *  - MediaProvider（选择器媒体分类视图，docId 形如 "video:12"，需反查 MediaStore）。
+     * 云盘等第三方 provider 无法解析，返回 null。
+     */
+    fun docUriToPath(context: Context, uri: Uri): String? = try {
+        when (uri.scheme) {
+            "file" -> uri.path
+            "content" -> when (uri.authority) {
+                "com.android.externalstorage.documents" ->
+                    docIdOf(uri)?.let { externalDocIdToPath(it) }
+                "com.android.providers.downloads.documents" ->
+                    docIdOf(uri)?.let { downloadsDocIdToPath(it) }
+                "com.android.providers.media.documents" ->
+                    docIdOf(uri)?.let { mediaDocIdToPath(context, it) }
+                else -> null
+            }
+            else -> null
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    /**
+     * uri 文档 id：优先 document 段（树作用域/平铺），退回 tree 段。
      *
      * uri 形态（pathSegments 解码后）：
      *  - 根目录 tree uri：  [tree, "primary:Movies"]                    → 取 tree 段
@@ -57,25 +86,18 @@ object StorageAccess {
      *  - 平铺 document uri：[document, "primary:a.mp4"]                  → 取 document 段
      * 子文档误取 tree 段会把每个文件都映射到根目录，必须先判 document 段。
      */
-    fun docUriToPath(uri: Uri): String? = try {
-        if (uri.scheme != "content") null
-        else if (uri.authority != "com.android.externalstorage.documents") null
-        else {
-            val segs = uri.pathSegments
-            val docId = when {
-                segs.size >= 2 && segs[0] == "document" -> DocumentsContract.getDocumentId(uri)
-                segs.size >= 4 && segs[2] == "document" -> DocumentsContract.getDocumentId(uri)
-                segs.isNotEmpty() && segs[0] == "tree" -> DocumentsContract.getTreeDocumentId(uri)
-                else -> DocumentsContract.getDocumentId(uri)
-            }
-            docIdToPath(docId)
+    private fun docIdOf(uri: Uri): String? {
+        val segs = uri.pathSegments
+        return when {
+            segs.size >= 2 && segs[0] == "document" -> DocumentsContract.getDocumentId(uri)
+            segs.size >= 4 && segs[2] == "document" -> DocumentsContract.getDocumentId(uri)
+            segs.isNotEmpty() && segs[0] == "tree" -> DocumentsContract.getTreeDocumentId(uri)
+            else -> DocumentsContract.getDocumentId(uri)
         }
-    } catch (_: Exception) {
-        null
     }
 
     /** ExternalStorageProvider 的 docId（形如 "primary:Movies/a.mp4"）→ 绝对路径 */
-    private fun docIdToPath(docId: String): String? {
+    private fun externalDocIdToPath(docId: String): String? {
         val sep = docId.indexOf(':')
         if (sep <= 0) return null
         val volume = docId.substring(0, sep)
@@ -93,7 +115,7 @@ object StorageAccess {
         } catch (_: Exception) {
             return null
         }
-        return docIdToPath(docId)?.let { File(it) }?.takeIf { it.isDirectory }
+        return externalDocIdToPath(docId)?.let { File(it) }?.takeIf { it.isDirectory }
     }
 
     /**
@@ -125,14 +147,61 @@ object StorageAccess {
     /** uri 对应的已存在文件/目录（须已具备直接读写能力，否则 null） */
     fun accessibleFile(context: Context, uri: Uri): File? {
         if (!hasAllFilesAccess(context)) return null
-        return docUriToPath(uri)?.let { p -> File(p).takeIf { it.exists() } }
+        return docUriToPath(context, uri)?.let { p -> File(p).takeIf { it.exists() } }
     }
 
     /** uri 对应的可写目标文件（文件本身可不存在，父目录必须存在且可写；否则 null） */
     fun writableTarget(context: Context, uri: Uri): File? {
         if (!hasAllFilesAccess(context)) return null
-        val path = docUriToPath(uri) ?: return null
+        val path = docUriToPath(context, uri) ?: return null
         val parent = File(path).parentFile ?: return null
         return if (parent.isDirectory && parent.canWrite()) File(path) else null
+    }
+
+    /**
+     * DownloadsProvider 的 docId → 绝对路径。
+     *  - "raw:/storage/emulated/0/Download/a.mp4"：新版本直接携带真实路径；
+     *  - "msf:N"：下载管理器中转 id，无稳定文件路径，无法解析；
+     *  - "a.mp4"：旧版本 docId 即 Download 目录下的文件名。
+     * 返回的路径仅为推导结果，由调用方（accessibleFile/writableTarget）验证存在性。
+     */
+    private fun downloadsDocIdToPath(docId: String): String? = when {
+        docId.startsWith("raw:") ->
+            docId.removePrefix("raw:").takeIf { it.startsWith("/") }
+        docId.startsWith("msf:") -> null
+        else -> "${Environment.getExternalStorageDirectory().absolutePath}/Download/$docId"
+    }
+
+    /**
+     * MediaProvider 的 docId（形如 "video:12" / "video:12:primary"，类型:行ID[:卷]）
+     * → 经 MediaStore 反查 DATA 列得到绝对路径。仅在已具备直接读写能力时调用；
+     * 行已删除/DATA 为空/查询异常均返回 null。
+     */
+    private fun mediaDocIdToPath(context: Context, docId: String): String? {
+        val parts = docId.split(':')
+        val type = parts.getOrNull(0) ?: return null
+        val rowId = parts.getOrNull(1)?.toLongOrNull() ?: return null
+        val collection = when (type) {
+            "video" -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            "audio" -> MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+            "image" -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            "downloads" ->
+                if (Build.VERSION.SDK_INT >= 29) MediaStore.Downloads.EXTERNAL_CONTENT_URI
+                else null
+            else -> null
+        } ?: return null
+        return try {
+            context.contentResolver.query(
+                collection,
+                arrayOf(MediaStore.MediaColumns.DATA),
+                "${MediaStore.MediaColumns._ID} = ?",
+                arrayOf(rowId.toString()),
+                null,
+            )?.use { c ->
+                if (c.moveToFirst()) c.getString(0)?.takeIf { it.isNotBlank() } else null
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 }
