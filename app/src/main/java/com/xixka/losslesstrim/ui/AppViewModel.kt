@@ -71,6 +71,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var scanJob: Job? = null
 
     init {
+        // 恢复持久化的每文件覆盖设置（片头/片尾/区间/丢弃轨道）：只读一次，
+        // 后续以内存态为准并主动落盘，避免落盘回显与本地修改互相覆盖
+        viewModelScope.launch {
+            val persisted = repo.overrides.first()
+            _overrides.update { cur -> if (cur.isEmpty()) persisted else cur }
+        }
         // 恢复上次目录（持久化权限仍有效时自动重扫）
         viewModelScope.launch {
             val treeStr = repo.lastTreeUri.first()
@@ -233,6 +239,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _overrides.update { m ->
             if (o == null || o.isEmpty) m - uri else m + (uri to o)
         }
+        persistOverrides()
+    }
+
+    /** 覆盖设置写入 DataStore（异步，失败不影响内存态） */
+    private fun persistOverrides() {
+        viewModelScope.launch {
+            runCatching { repo.saveOverrides(_overrides.value) }
+        }
     }
 
     /** 把变换写入所有视频的单独设置（合并保留已有字段，需文件信息换算时用 entry）；结果为空则移除该文件的覆盖 */
@@ -245,30 +259,35 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
             result
         }
+        persistOverrides()
     }
 
-    /** 头尾裁剪模式：统一全部视频的片头/片尾（0 = 不裁剪），同步换算区间字段（参数互通） */
-    fun applyHeadTailToAll(head: Double, tail: Double) = applyOverrideToAll { f, it ->
-        val dur = f.probe.durationSec
-        it.copy(
-            headSec = head.takeIf { v -> v > 0.0 },
-            tailSec = tail.takeIf { v -> v > 0.0 },
-            intervalStartSec = head.takeIf { v -> v > 0.0 },
-            intervalEndSec = (dur - tail).takeIf { tail > 0.0 && it > 0.0 },
-        )
-    }
+    /** 头尾裁剪模式：统一全部视频的片头/片尾/丢弃轨道（0 = 不裁剪/不丢），同步换算区间字段（参数互通） */
+    fun applyHeadTailToAll(head: Double, tail: Double, dropped: Set<Int> = emptySet()) =
+        applyOverrideToAll { f, it ->
+            val dur = f.probe.durationSec
+            it.copy(
+                headSec = head.takeIf { v -> v > 0.0 },
+                tailSec = tail.takeIf { v -> v > 0.0 },
+                intervalStartSec = head.takeIf { v -> v > 0.0 },
+                intervalEndSec = (dur - tail).takeIf { tail > 0.0 && it > 0.0 },
+                droppedStreams = dropped,
+            )
+        }
 
-    /** 区间模式：统一全部视频的开始/结束（-1 = 保留全片），同步换算头尾字段（参数互通） */
-    fun applyIntervalToAll(start: Double, end: Double) = applyOverrideToAll { f, it ->
-        val dur = f.probe.durationSec
-        val endSec = if (end < 0) dur else end
-        it.copy(
-            intervalStartSec = start.takeIf { v -> v >= 0.0 },
-            intervalEndSec = end.takeIf { v -> v >= 0.0 },
-            headSec = start.takeIf { v -> v > 0.0 },
-            tailSec = (dur - endSec).takeIf { endSec < dur && it > 0.0 },
-        )
-    }
+    /** 区间模式：统一全部视频的开始/结束/丢弃轨道（-1 = 保留全片），同步换算头尾字段（参数互通） */
+    fun applyIntervalToAll(start: Double, end: Double, dropped: Set<Int> = emptySet()) =
+        applyOverrideToAll { f, it ->
+            val dur = f.probe.durationSec
+            val endSec = if (end < 0) dur else end
+            it.copy(
+                intervalStartSec = start.takeIf { v -> v >= 0.0 },
+                intervalEndSec = end.takeIf { v -> v >= 0.0 },
+                headSec = start.takeIf { v -> v > 0.0 },
+                tailSec = (dur - endSec).takeIf { endSec < dur && it > 0.0 },
+                droppedStreams = dropped,
+            )
+        }
 
     fun confirmOverwrite() {
         updateSettings { it.copy(overwriteConfirmed = true) }

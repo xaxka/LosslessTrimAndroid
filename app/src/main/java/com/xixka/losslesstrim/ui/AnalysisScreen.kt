@@ -14,13 +14,17 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -213,21 +217,21 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                 )
                 if (settings.mode == TrimMode.HEAD_TAIL) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(
+                        SecondsStepperField(
                             value = headText,
                             onValueChange = { headText = it },
-                            label = { Text("片头(秒)") },
-                            supportingText = { Text("0 = 不切") },
-                            singleLine = true,
+                            onStep = { d -> headText = stepSeconds(Formats.parseSeconds(headText), d) },
+                            label = "片头(秒)",
+                            supportingText = "0 = 不切",
                             isError = (Formats.parseSeconds(headText) ?: -1.0) < 0,
                             modifier = Modifier.weight(1f),
                         )
-                        OutlinedTextField(
+                        SecondsStepperField(
                             value = tailText,
                             onValueChange = { tailText = it },
-                            label = { Text("片尾(秒)") },
-                            supportingText = { Text("0 = 不切") },
-                            singleLine = true,
+                            onStep = { d -> tailText = stepSeconds(Formats.parseSeconds(tailText), d) },
+                            label = "片尾(秒)",
+                            supportingText = "0 = 不切",
                             isError = (Formats.parseSeconds(tailText) ?: -1.0) < 0,
                             modifier = Modifier.weight(1f),
                         )
@@ -378,14 +382,15 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                     }) { Text("清除本片设置") }
                 }
             }
-            // 目录模式下：把本片的剪辑参数应用到全部视频（两种模式均写入每视频的单独设置）
+            // 目录模式下：把本片的剪辑参数（含丢弃轨道）应用到全部视频
+            // （两种模式均写入每视频的单独设置，轨道勾选同步下发）
             if (!entry.isSingleFile) {
                 BlOutlinedButton(
                     onClick = {
                         if (settings.mode == TrimMode.HEAD_TAIL) {
-                            vm.applyHeadTailToAll(head, tail)
+                            vm.applyHeadTailToAll(head, tail, dropped)
                         } else {
-                            vm.applyIntervalToAll(startRaw, endRaw)
+                            vm.applyIntervalToAll(startRaw, endRaw, dropped)
                         }
                         onClose()
                     },
@@ -394,6 +399,58 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                 ) { Text("应用到全部视频") }
             }
             Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+/**
+ * 步进 ±1 秒并清零小数：+ 取整数部分进 1（3.6 → 4），− 退到整数（3.6 → 3），
+ * 结果钳制 ≥ 0；输入非法按 0 处理。点击后显示为纯整数（无小数点）。
+ */
+private fun stepSeconds(cur: Double?, delta: Int): String {
+    val v = cur ?: 0.0
+    val next = if (delta > 0) kotlin.math.floor(v) + delta else kotlin.math.ceil(v) + delta
+    return next.toInt().coerceAtLeast(0).toString()
+}
+
+/** 片头/片尾秒数输入框 + 数字调节器（右侧 ＋/− 按钮，点击 ±1 秒且清零小数） */
+@Composable
+private fun SecondsStepperField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    onStep: (Int) -> Unit,
+    label: String,
+    supportingText: String,
+    isError: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            label = { Text(label) },
+            supportingText = { Text(supportingText) },
+            singleLine = true,
+            isError = isError,
+            modifier = Modifier.weight(1f),
+        )
+        Column(
+            Modifier.padding(start = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            FilledTonalIconButton(
+                onClick = { onStep(+1) },
+                modifier = Modifier.size(30.dp),
+            ) {
+                Icon(Icons.Filled.Add, contentDescription = "$label +1 秒", modifier = Modifier.size(18.dp))
+            }
+            FilledTonalIconButton(
+                onClick = { onStep(-1) },
+                modifier = Modifier.size(30.dp),
+            ) {
+                Icon(Icons.Filled.Remove, contentDescription = "$label -1 秒", modifier = Modifier.size(18.dp))
+            }
         }
     }
 }
