@@ -524,11 +524,6 @@ fun VideoPlayerPanel(
                 enabled = prepared && keyframes.isNotEmpty(),
             ) { Icon(Icons.Default.SkipNext, contentDescription = "下一关键帧") }
         }
-        Text(
-            "跳转按钮只移动播放位置；书签按钮设定剪辑区间起止",
-            style = MaterialTheme.typography.labelSmall,
-            color = BlExt.textSecondary,
-        )
     }
 }
 

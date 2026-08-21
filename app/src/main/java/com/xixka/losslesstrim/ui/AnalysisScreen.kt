@@ -2,6 +2,9 @@ package com.xixka.losslesstrim.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -15,16 +18,16 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -46,12 +49,15 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -100,11 +106,12 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
         keyframes = Probe.probeKeyframes(context, entry.docUri)
     }
 
-    fun fmtSec(v: Double): String =
-        if (v == v.toLong().toDouble()) v.toLong().toString() else String.format(Locale.US, "%.1f", v)
+    // UI 层只显示整数秒：小数精度由关键帧对齐层（TrimPlanner）持有，
+    // ffmpeg 执行时用的仍是关键帧真实时间戳，用户无感
+    fun fmtSec(v: Double): String = kotlin.math.round(v).toLong().toString()
 
-    // 区间模式 -1（不切）原样显示
-    fun initIntervalText(v: Double): String = if (v < 0) "-1" else Formats.clockMs(v)
+    // 区间模式 -1（不切）原样显示；回显同样取整秒（clock 无小数）
+    fun initIntervalText(v: Double): String = if (v < 0) "-1" else Formats.clock(v)
 
     var headText by remember { mutableStateOf(fmtSec(savedOverride?.headSec ?: 0.0)) }
     var tailText by remember { mutableStateOf(fmtSec(savedOverride?.tailSec ?: 0.0)) }
@@ -140,8 +147,8 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
         when {
             settings.mode == TrimMode.HEAD_TAIL && isStart -> headText = fmtSec(snapped)
             settings.mode == TrimMode.HEAD_TAIL -> tailText = fmtSec((dur - snapped).coerceIn(0.0, dur))
-            isStart -> startText = Formats.clockMs(snapped)
-            else -> endText = Formats.clockMs(snapped)
+            isStart -> startText = Formats.clock(snapped)
+            else -> endText = Formats.clock(snapped)
         }
     }
 
@@ -178,21 +185,18 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                 onSetStart = { pos ->
                     // 头尾模式：设片头；区间模式：设开始
                     if (settings.mode == TrimMode.HEAD_TAIL) headText = fmtSec(pos.coerceIn(0.0, dur))
-                    else startText = Formats.clockMs(pos.coerceIn(0.0, dur))
+                    else startText = Formats.clock(pos.coerceIn(0.0, dur))
                 },
                 onSetEnd = { pos ->
                     if (settings.mode == TrimMode.HEAD_TAIL) tailText = fmtSec((dur - pos).coerceIn(0.0, dur))
-                    else endText = Formats.clockMs(pos.coerceIn(0.0, dur))
+                    else endText = Formats.clock(pos.coerceIn(0.0, dur))
                 },
                 onPositionChange = { playheadSec = it },
                 seekRequest = seekReq,
             )
 
             // ---------- 时间轴 ----------
-            SectionCard(
-                title = "时间轴与切点",
-                subtitle = "蓝块 = 保留；红斜纹 = 剪掉。拖动白手柄调整切点（自动吸附关键帧），红色虚线 = 关键帧对齐后的实际切点",
-            ) {
+            SectionCard(title = null) {
                 if (keyframes == null) {
                     LinearProgressIndicator(
                         Modifier.fillMaxWidth(),
@@ -222,7 +226,6 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                             onValueChange = { headText = it },
                             onStep = { d -> headText = stepSeconds(Formats.parseSeconds(headText), d) },
                             label = "片头(秒)",
-                            supportingText = "0 = 不切",
                             isError = (Formats.parseSeconds(headText) ?: -1.0) < 0,
                             modifier = Modifier.weight(1f),
                         )
@@ -231,7 +234,6 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                             onValueChange = { tailText = it },
                             onStep = { d -> tailText = stepSeconds(Formats.parseSeconds(tailText), d) },
                             label = "片尾(秒)",
-                            supportingText = "0 = 不切",
                             isError = (Formats.parseSeconds(tailText) ?: -1.0) < 0,
                             modifier = Modifier.weight(1f),
                         )
@@ -240,18 +242,17 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
                             value = startText,
-                            onValueChange = { startText = it },
+                            // 分:秒口径同样取整：滤掉小数点，保留 -1/冒号语法
+                            onValueChange = { startText = it.filter { c -> c != '.' } },
                             label = { Text("开始(分:秒)") },
-                            supportingText = { Text("-1 = 从头") },
                             singleLine = true,
                             isError = Formats.parseTime(startText) == null || start >= end,
                             modifier = Modifier.weight(1f),
                         )
                         OutlinedTextField(
                             value = endText,
-                            onValueChange = { endText = it },
+                            onValueChange = { endText = it.filter { c -> c != '.' } },
                             label = { Text("结束(分:秒)") },
-                            supportingText = { Text("-1 = 到片尾") },
                             singleLine = true,
                             isError = Formats.parseTime(endText) == null || start >= end,
                             modifier = Modifier.weight(1f),
@@ -269,8 +270,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                             append("（${if (dS >= 0) "+" else ""}${String.format(Locale.US, "%.1f", dS)}s）\n")
                             append("设定终点 ").append(Formats.clockMs(plan.requestedEnd))
                             append(" → 实际 ").append(Formats.clockMs(plan.actualEnd))
-                            append("（${if (dE >= 0) "+" else ""}${String.format(Locale.US, "%.1f", dE)}s）\n")
-                            append("保留时长 ≈ ").append(Formats.clock(plan.duration))
+                            append("（${if (dE >= 0) "+" else ""}${String.format(Locale.US, "%.1f", dE)}s）")
                             if (plan.truncated) append("（终点超片长已截断）")
                             if (kfs.isEmpty()) append("\n（无关键帧信息：切点不做对齐）")
                         },
@@ -404,8 +404,8 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
 }
 
 /**
- * 步进 ±1 秒并清零小数：+ 取整数部分进 1（3.6 → 4），− 退到整数（3.6 → 3），
- * 结果钳制 ≥ 0；输入非法按 0 处理。点击后显示为纯整数（无小数点）。
+ * 步进 ±1 秒（UI 层纯整数，无小数可清）；结果钳制 ≥ 0。
+ * 兼容旧持久化值可能带小数：+ 向上进整、− 退到整数。
  */
 private fun stepSeconds(cur: Double?, delta: Int): String {
     val v = cur ?: 0.0
@@ -413,45 +413,60 @@ private fun stepSeconds(cur: Double?, delta: Int): String {
     return next.toInt().coerceAtLeast(0).toString()
 }
 
-/** 片头/片尾秒数输入框 + 数字调节器（右侧 ＋/− 按钮，点击 ±1 秒且清零小数） */
+/**
+ * 片头/片尾秒数输入框 + 一体式数字调节器：上下箭头收进输入框 trailingIcon
+ * 插槽（不再外挂按钮列），点击 ±1 秒且清零小数（[stepSeconds]）。
+ */
 @Composable
 private fun SecondsStepperField(
     value: String,
     onValueChange: (String) -> Unit,
     onStep: (Int) -> Unit,
     label: String,
-    supportingText: String,
     isError: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
-        OutlinedTextField(
-            value = value,
-            onValueChange = onValueChange,
-            label = { Text(label) },
-            supportingText = { Text(supportingText) },
-            singleLine = true,
-            isError = isError,
-            modifier = Modifier.weight(1f),
-        )
-        Column(
-            Modifier.padding(start = 4.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            FilledTonalIconButton(
-                onClick = { onStep(+1) },
-                modifier = Modifier.size(30.dp),
+    OutlinedTextField(
+        value = value,
+        // 只保留数字（含粘贴内容），小数点/负号/空格一律滤除——UI 层零小数
+        onValueChange = { raw -> onValueChange(raw.filter { it.isDigit() }) },
+        label = { Text(label) },
+        singleLine = true,
+        isError = isError,
+        // 纯整数秒：数字键盘无小数点，粘贴/输入过滤掉非数字字符
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        trailingIcon = {
+            Column(
+                Modifier.width(28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Icon(Icons.Filled.Add, contentDescription = "$label +1 秒", modifier = Modifier.size(18.dp))
+                StepperArrow(Icons.Filled.KeyboardArrowUp, "$label +1 秒") { onStep(+1) }
+                StepperArrow(Icons.Filled.KeyboardArrowDown, "$label -1 秒") { onStep(-1) }
             }
-            FilledTonalIconButton(
-                onClick = { onStep(-1) },
-                modifier = Modifier.size(30.dp),
-            ) {
-                Icon(Icons.Filled.Remove, contentDescription = "$label -1 秒", modifier = Modifier.size(18.dp))
-            }
-        }
+        },
+        modifier = modifier,
+    )
+}
+
+/**
+ * 步进箭头（输入框内）：26dp 高的可点击区域 ×2 = 52dp，恰好收进
+ * OutlinedTextField 56dp 的默认最小高度，不撑破输入框。
+ * 不用 IconButton：它强制 48dp 最小触达目标，在插槽里会溢出。
+ */
+@Composable
+private fun StepperArrow(
+    icon: ImageVector,
+    desc: String,
+    onClick: () -> Unit,
+) {
+    Box(
+        Modifier
+            .size(width = 28.dp, height = 26.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, contentDescription = desc, modifier = Modifier.size(20.dp))
     }
 }
 

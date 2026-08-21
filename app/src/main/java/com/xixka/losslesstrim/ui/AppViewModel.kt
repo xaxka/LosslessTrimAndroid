@@ -14,6 +14,7 @@ import com.xixka.losslesstrim.data.Scanner
 import com.xixka.losslesstrim.data.SettingsRepository
 import com.xixka.losslesstrim.data.VideoEntry
 import com.xixka.losslesstrim.trim.DocUtils
+import com.xixka.losslesstrim.trim.QueueUi
 import com.xixka.losslesstrim.trim.TrimController
 import com.xixka.losslesstrim.trim.TrimJob
 import com.xixka.losslesstrim.trim.TrimPlanner
@@ -25,6 +26,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -76,6 +78,23 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val persisted = repo.overrides.first()
             _overrides.update { cur -> if (cur.isEmpty()) persisted else cur }
+        }
+        // 任务完成：清掉已成功文件的覆盖设置（成功即消费）。覆盖模式下 uri 不变
+        // 但文件已换成剪辑产物，残留的旧切点/丢弃轨道会作用在新时间轴上
+        // （点开视频仍显示旧时间与"将丢弃 N 条轨道"）；失败/取消项保留供重试
+        viewModelScope.launch {
+            TrimController.queueUi
+                .filterIsInstance<QueueUi.Finished>()
+                .collect { fin ->
+                    val doneUris = fin.results
+                        .filter { it.outcome == Outcome.SUCCESS }
+                        .map { it.entry.docUri }
+                        .toSet()
+                    if (doneUris.isNotEmpty() && _overrides.value.keys.any { it in doneUris }) {
+                        _overrides.update { m -> m - doneUris }
+                        persistOverrides()
+                    }
+                }
         }
         // 恢复上次目录（持久化权限仍有效时自动重扫）
         viewModelScope.launch {
