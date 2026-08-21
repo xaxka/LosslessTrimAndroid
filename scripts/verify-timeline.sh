@@ -15,6 +15,7 @@
 #     T7 旋转元数据：mp4→mkv / mp4→mp4 转封装保留 Display Matrix
 #     T8 TS 源：TS→MKV 归零；TS→TS 需 -muxdelay 0（默认 1.4s 偏移复现）
 #     T9 VFR 源：非均匀时间戳网格剪切归零 + 解码干净
+#     T10 B帧 seek 落点：-ss 无 fudge 复现早落一个 GOP（修复臂 = T2 落点断言）
 set -euo pipefail
 W="$(mktemp -d)"
 cd "$W"
@@ -122,9 +123,11 @@ ffmpeg -hide_banner -loglevel error -y -ss "$SS" -noaccurate_seek -i src.mkv \
   -avoid_negative_ts make_zero -bsf:s "$CLAMP" -disposition:a:0 default -f matroska t2.mkv
 read -r DUR STT V0 VEND A0 ACNT SEND OVER <<< "$(measure t2.mkv)"
 echo "  dur=$DUR st=$STT v0=$V0 vend=$VEND a0=$A0 aN=$ACNT sub_end=$SEND 尾超=$OVER"
-python3 -c "exit(0 if $OVER < 0.5 and $SEND < $DUR + 0.5 and abs($STT) < 0.5 else 1)" \
+# vend/dur 上界 = B帧 seek 精确落点断言（docs/mkv-bframe-seek-offset.md）：
+# fudge 丢失时 seek 早落一个 GOP，视频多进 ~2s → vend≈32、dur≈32，此处即红
+python3 -c "exit(0 if $OVER < 0.5 and $SEND < $DUR + 0.5 and abs($STT) < 0.5 and $VEND < 30.7 and abs($DUR - 30.0) < 1.0 else 1)" \
   || { echo "T2 FAIL"; exit 1; }
-echo "  T2 PASS（超播消除、起点归零）"
+echo "  T2 PASS（超播消除、起点归零、精确落点）"
 
 # ---- 样例 B：片头剪 30s ----
 T4="30.000"
@@ -301,5 +304,20 @@ echo "  VFR 剪切: start=$ST9 dur=$D9"
 python3 -c "exit(0 if abs($ST9) < 0.1 and abs($D9 - 6.0) < 1.0 else 1)" || { echo "T9 FAIL: VFR 时间轴异常"; exit 1; }
 decode_clean t9.mkv || { echo "T9 FAIL: 解码错误"; exit 1; }
 echo "  T9 PASS（VFR 归零、解码干净）"
+
+# ---- T10 MKV+B帧 seek 精确落点（docs/mkv-bframe-seek-offset.md 永久回归）----
+# -ss 传关键帧原值（无 fudge）：ffmpeg 把 seek 目标前移 3/23s + start_time（
+# AAC priming 为负），Cues 向后搜索命中前一个关键帧 → 起点早落一个 GOP，
+# 视频多进 ~2s（vend≈32）。修复臂即 T2（ss=KF+fudge，已含 vend<30.7 断言）。
+echo; echo "== T10 B帧 seek 落点（-ss $KF 无 fudge，应复现早落一个 GOP）:"
+ffmpeg -hide_banner -loglevel error -y -ss "$KF" -noaccurate_seek -i src.mkv \
+  -t "$T" -map 0:0 -map 0:1 -map 0:2 -c copy -map_metadata 0 -map_chapters 0 \
+  -avoid_negative_ts make_zero -bsf:s "$CLAMP" -disposition:a:0 default -f matroska t10.mkv
+read -r DUR10 STT10 V010 VEND10 A010 ACNT10 SEND10 OVER10 <<< "$(measure t10.mkv)"
+echo "  dur=$DUR10 vend=$VEND10（预期 ≈32：早落一个 GOP，视频多进 ~2s）"
+python3 -c "exit(0 if $VEND10 > 31.5 and $DUR10 > 31.5 else 1)" \
+  || { echo "T10 FAIL: 早落 GOP 未复现（ffmpeg 行为变化？请重估 fudge 公式）"; exit 1; }
+decode_clean t10.mkv || { echo "T10 FAIL: 解码错误"; exit 1; }
+echo "  T10 PASS（复现确认；修复臂见 T2 落点断言）"
 
 echo; echo "ALL PASS"

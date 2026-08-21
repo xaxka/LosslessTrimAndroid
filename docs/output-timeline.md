@@ -166,7 +166,7 @@ TS 系放宽 1.6s）、时长准确（±2s，同时覆盖字幕拖尾与 -t 锚�
 - HDR10+ 的动态元数据在 SEI 里 copy 原样保留、不认识的老设备优雅降级为
   静态 HDR10，无需提示。
 
-### 8.4 E2E 扩展（T5–T9，scripts/verify-timeline.sh）
+### 8.4 E2E 扩展（T5–T10，scripts/verify-timeline.sh）
 
 | # | 场景 | 断言 |
 |---|------|------|
@@ -175,18 +175,21 @@ TS 系放宽 1.6s）、时长准确（±2s，同时覆盖字幕拖尾与 -t 锚�
 | T7 | 旋转元数据 | mp4→mkv / mp4→mp4 两侧 rotation 均保留 |
 | T8 | TS 源 | TS→MKV 归零；TS→TS 无 muxdelay 复现 1.4s 偏移、加参数归零 |
 | T9 | VFR 源（select 造非均匀网格） | 剪切归零、时长正确、解码零错误 |
+| T10 | B帧 seek 落点（前置修复的回归锚） | 无 fudge 复现早落一个 GOP（vend>31.5）；修复臂 = T2 的 vend<30.7、\|dur−30\|<1s |
 
-T5–T9 全部附带 `ffmpeg -v error` 解码扫描（残缺 GOP/时间戳坏档会现形）。
+T5–T10 全部附带 `ffmpeg -v error` 解码扫描（残缺 GOP/时间戳坏档会现形）。
 
 ## 9. 回归守卫
 
 `.github/workflows/timeline-regression.yml`（main push + 所有 PR +
 手动触发）双防线：
 
-1. **单测**（TrimCommandTest，18 用例）：直接断言 buildCommand 产出的
-   参数形态——改坏命令生成逻辑即红；
-2. **E2E**（scripts/verify-timeline.sh，T1–T9）：真实 ffmpeg 验证命令
-   形态的实际输出——错误参数即使编译通过也会现形（T1/T3/T5/T8 各含
+1. **单测**（TrimCommandTest，22 用例）：纯函数断言 + **`assembleCommand`
+   装配锚点**（逐字断言完整命令串——fudge 应用、-t 锚定、钳制、
+   disposition、附件、faststart、降级路径任一步被改掉即红；E2E 脚本的
+   命令是手写镜像，抓不住 app 代码的装配回退，装配锚点补上这个缺口）；
+2. **E2E**（scripts/verify-timeline.sh，T1–T10）：真实 ffmpeg 验证命令
+   形态的实际输出——错误参数即使编译通过也会现形（T1/T3/T5/T8/T10 各含
    "旧命令复现"对照，防止断言退化为恒真）。
 
 [mkv-bframe-seek-offset.md]: ./mkv-bframe-seek-offset.md

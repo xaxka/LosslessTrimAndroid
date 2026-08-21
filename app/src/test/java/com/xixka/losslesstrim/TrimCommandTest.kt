@@ -2,6 +2,7 @@ package com.xixka.losslesstrim
 
 import com.xixka.losslesstrim.data.ProbeResult
 import com.xixka.losslesstrim.data.StreamInfo
+import com.xixka.losslesstrim.data.TrimPlan
 import com.xixka.losslesstrim.trim.OutputTarget
 import com.xixka.losslesstrim.trim.TrimService
 import org.junit.Assert.assertEquals
@@ -291,5 +292,113 @@ class TrimCommandTest {
                 startToleranceSec = 1.6,
             ).isEmpty(),
         )
+    }
+
+    // ---------- assembleCommand（装配锚点：任何装配步骤被回退即红） ----------
+
+    /** 样例与 docs/mkv-bframe-seek-offset.md 同构：matroska + bf=2 + start_time=-0.023 */
+    private fun bframeProbe() = ProbeResult(
+        probeOk = true, durationSec = 60.0, formatName = "matroska", startTimeSec = -0.023,
+        streams = listOf(
+            StreamInfo(
+                index = 0, codecType = "video", codecName = "h264",
+                language = null, title = null, channels = null, channelLayout = null,
+                width = null, height = null, attachedPic = false, hasBFrames = 2,
+            ),
+            stream(1, "audio"),
+            stream(2, "subtitle"),
+        ),
+    )
+
+    private fun mkvTarget() = OutputTarget("matroska", "mkv", "video/x-matroska")
+
+    @Test
+    fun `assemble mid cut applies fudge to ss and anchors t on it`() {
+        // fudge = 0.131 + 0.023(start_time) = 0.154 → ss=30.154、dur=60-30.154=29.846。
+        // 若有人把 "ss = actualStart + fudge" 改回 actualStart，或忘了 -t 同步减
+        // fudge，此断言即红（docs/mkv-bframe-seek-offset.md §7）
+        val plan = TrimPlan(
+            ok = true, requestedStart = 30.0, requestedEnd = 60.0,
+            actualStart = 30.0, actualEnd = 60.0,
+        )
+        val cmd = TrimService.assembleCommand(
+            "/in.mkv", "/out.mkv", plan, listOf(0, 1, 2), mkvTarget(), bframeProbe(),
+        )
+        assertEquals(
+            "-hide_banner -y -ss 30.154 -noaccurate_seek -i \"/in.mkv\" -t 29.846 " +
+                "-map 0:0 -map 0:1 -map 0:2 -map 0:t? -c copy -map_metadata 0 -map_chapters 0 " +
+                "-avoid_negative_ts make_zero " +
+                "-bsf:s setts=duration=if(gte(DURATION\\,0)\\,max(min(DURATION\\,(29.846/TB)-TS)\\,0)\\,0) " +
+                "-disposition:a:0 default -f matroska \"/out.mkv\"",
+            cmd,
+        )
+    }
+
+    @Test
+    fun `assemble head cut omits ss and make_zero keeps clamp`() {
+        // 片头剪：无 -ss（防丢音频）、无 make_zero（防负 pts），钳制与加固项保留
+        val plan = TrimPlan(
+            ok = true, requestedStart = 0.0, requestedEnd = 30.0,
+            actualStart = 0.0, actualEnd = 30.0,
+        )
+        val cmd = TrimService.assembleCommand(
+            "/in.mkv", "/out.mkv", plan, listOf(0, 1, 2), mkvTarget(), bframeProbe(),
+        )
+        assertEquals(
+            "-hide_banner -y -i \"/in.mkv\" -t 30.000 " +
+                "-map 0:0 -map 0:1 -map 0:2 -map 0:t? -c copy -map_metadata 0 -map_chapters 0 " +
+                "-bsf:s setts=duration=if(gte(DURATION\\,0)\\,max(min(DURATION\\,(30.000/TB)-TS)\\,0)\\,0) " +
+                "-disposition:a:0 default -f matroska \"/out.mkv\"",
+            cmd,
+        )
+    }
+
+    @Test
+    fun `assemble mp4 input skips fudge and mp4 output uses faststart`() {
+        // mp4 输入设 AVFMT_SEEK_TO_PTS，无 B帧前移 → ss=30.000 原值；
+        // mp4 输出：无附件 map、追加 faststart；kept 无字幕 → 无 bsf
+        val plan = TrimPlan(
+            ok = true, requestedStart = 30.0, requestedEnd = 60.0,
+            actualStart = 30.0, actualEnd = 60.0,
+        )
+        val probe = ProbeResult(
+            probeOk = true, durationSec = 60.0, formatName = "mov,mp4", startTimeSec = 0.0,
+            streams = listOf(
+                StreamInfo(
+                    index = 0, codecType = "video", codecName = "h264",
+                    language = null, title = null, channels = null, channelLayout = null,
+                    width = null, height = null, attachedPic = false, hasBFrames = 2,
+                ),
+                stream(1, "audio"),
+            ),
+        )
+        val cmd = TrimService.assembleCommand(
+            "/in.mp4", "/out.mp4", plan, listOf(0, 1),
+            OutputTarget("mp4", "mp4", "video/mp4"), probe,
+        )
+        assertEquals(
+            "-hide_banner -y -ss 30.000 -noaccurate_seek -i \"/in.mp4\" -t 30.000 " +
+                "-map 0:0 -map 0:1 -c copy -map_metadata 0 -map_chapters 0 " +
+                "-avoid_negative_ts make_zero " +
+                "-disposition:a:0 default -movflags +faststart -f mp4 \"/out.mp4\"",
+            cmd,
+        )
+    }
+
+    @Test
+    fun `assemble degraded retry drops subtitle clamp bsf`() {
+        val plan = TrimPlan(
+            ok = true, requestedStart = 30.0, requestedEnd = 60.0,
+            actualStart = 30.0, actualEnd = 60.0,
+        )
+        val cmd = TrimService.assembleCommand(
+            "/in.mkv", "/out.mkv", plan, listOf(0, 1, 2), mkvTarget(), bframeProbe(),
+            clampSubtitles = false,
+        )
+        assertFalse(cmd.contains(" -bsf:s "))
+        // 降级只去钳制，其余加固项（fudge/make_zero/disposition/附件）不动
+        assertTrue(cmd.contains(" -ss 30.154 "))
+        assertTrue(cmd.contains(" -avoid_negative_ts make_zero"))
+        assertTrue(cmd.contains(" -disposition:a:0 default"))
     }
 }

@@ -1,5 +1,13 @@
 # MKV(含B帧)无损剪辑：切点早落一个 GOP，字幕/成片时间整体偏移
 
+> 状态（2026-08-21 晚 追加）：**本修复已纳入永久回归守卫**（timeline-regression
+> workflow，main push + 所有 PR 触发）三层锚定，防止被回退：
+> ① 单测 `TrimCommandTest.assemble mid cut…` **逐字断言完整命令**——
+> `ss = actualStart + fudge` 或 `-t` 同步减 fudge 任一步被改掉即红（装配
+> 锚点，比只测 seekFudgeSec 纯公式强：删掉"应用 fudge"那行也会被抓住）；
+> ② E2E T10 复现臂：`-ss` 传关键帧原值断言早落一个 GOP（vend>31.5）；
+> ③ E2E T2 修复臂新增落点断言（vend<30.7、|dur−30|<1s）——此前 T2 只断言
+> 超播/起点，fudge 丢失时视频多进 2s **不会**触发任何断言（已修）。
 > 状态（2026-08-20 晚 追加）：**修复已落地（main aebdb65..5667ad7）并经 CI 验证通过**。
 > CI 复现实验发现 §7 原公式的缺陷：ffmpeg 还会把 `ic->start_time` 加进 seek 目标，
 > AAC priming 等导致 start_time<0 的文件（实测 −23ms）实际前移量达 153ms，仅补

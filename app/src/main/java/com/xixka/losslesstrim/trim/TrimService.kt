@@ -243,6 +243,49 @@ class TrimService : Service() {
 
         /** 时长校验容差（秒）：GOP 对齐后实际时长与计划值的合法偏差上限 */
         const val DURATION_TOLERANCE_SEC = 2.0
+
+        /**
+         * 剪辑命令装配（纯函数，单测逐段断言——**这是防回退的关键锚点**：
+         * 任何人在这里去掉 fudge/钳制/disposition 等装配步骤，TrimCommandTest
+         * 直接红，不必等真机）。
+         *
+         * -ss 补偿见 [seekFudgeSec]；-t 锚定在 -ss 值上（停止条件 pts ≥ ss+t），
+         * 须同步减去同量，终点才能仍落在 actualEnd。片头剪切不传 -ss（见
+         * [seekArgs]）、不传 make_zero（见 [avoidNegativeTsArgs]）；字幕时长
+         * 钳制见 [subtitleClampBsf]（clampSubtitles=false 为校验失败后的降级
+         * 重跑路径）；disposition/附件/章节/muxdelay 见各函数注释。
+         */
+        fun assembleCommand(
+            inParam: String,
+            outParam: String,
+            plan: TrimPlan,
+            kept: List<Int>,
+            target: OutputTarget,
+            probe: ProbeResult,
+            clampSubtitles: Boolean = true,
+        ): String {
+            val fudge = seekFudgeSec(plan.actualStart, probe)
+            val ss = plan.actualStart + fudge
+            val dur = (plan.actualEnd - ss).coerceAtLeast(0.001)
+            val sb = StringBuilder()
+            sb.append("-hide_banner -y")
+            sb.append(seekArgs(ss))
+            sb.append(" -i \"").append(inParam).append("\"")
+            sb.append(" -t ").append(Formats.secs3(dur))
+            for (i in kept) sb.append(" -map 0:").append(i)
+            sb.append(attachmentArgs(target))
+            sb.append(" -c copy -map_metadata 0 -map_chapters 0")
+            sb.append(avoidNegativeTsArgs(ss))
+            if (clampSubtitles && hasKeptSubtitle(probe, kept)) {
+                sb.append(" -bsf:s ").append(subtitleClampBsf(dur))
+            }
+            sb.append(dispositionArgs(probe, kept))
+            sb.append(muxDelayArgs(target))
+            if (target.muxer == "mp4") sb.append(" -movflags +faststart")
+            sb.append(" -f ").append(target.muxer)
+            sb.append(" \"").append(outParam).append("\"")
+            return sb.toString()
+        }
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -754,34 +797,7 @@ class TrimService : Service() {
         target: OutputTarget,
         entry: VideoEntry,
         clampSubtitles: Boolean = true,
-    ): String {
-        // -ss 补偿见 [seekFudgeSec]；-t 锚定在 -ss 值上（停止条件 pts ≥ ss+t），
-        // 须同步减去同量，终点才能仍落在 actualEnd。片头剪切不传 -ss（见
-        // [seekArgs]）、不传 make_zero（见 [avoidNegativeTsArgs]）；字幕时长
-        // 钳制见 [subtitleClampBsf]（clampSubtitles=false 为校验失败后的降级
-        // 重跑路径）；disposition/附件/章节/muxdelay 见各函数注释。
-        val fudge = seekFudgeSec(plan.actualStart, entry.probe)
-        val ss = plan.actualStart + fudge
-        val dur = (plan.actualEnd - ss).coerceAtLeast(0.001)
-        val sb = StringBuilder()
-        sb.append("-hide_banner -y")
-        sb.append(seekArgs(ss))
-        sb.append(" -i \"").append(inParam).append("\"")
-        sb.append(" -t ").append(Formats.secs3(dur))
-        for (i in kept) sb.append(" -map 0:").append(i)
-        sb.append(attachmentArgs(target))
-        sb.append(" -c copy -map_metadata 0 -map_chapters 0")
-        sb.append(avoidNegativeTsArgs(ss))
-        if (clampSubtitles && hasKeptSubtitle(entry.probe, kept)) {
-            sb.append(" -bsf:s ").append(subtitleClampBsf(dur))
-        }
-        sb.append(dispositionArgs(entry.probe, kept))
-        sb.append(muxDelayArgs(target))
-        if (target.muxer == "mp4") sb.append(" -movflags +faststart")
-        sb.append(" -f ").append(target.muxer)
-        sb.append(" \"").append(outParam).append("\"")
-        return sb.toString()
-    }
+    ): String = assembleCommand(inParam, outParam, plan, kept, target, entry.probe, clampSubtitles)
 
     private fun extractError(session: FFmpegSession): String {
         // 优先取 SessionBridge 定格的完整日志（会话被挤出 ffmpeg-kit 历史时
