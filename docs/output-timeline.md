@@ -1,5 +1,10 @@
 # 输出时间轴三缺陷：起点非 0 / 结尾超播 / 片头剪丢音频
 
+> 状态（2026-08-21 晚）：**加固批次落地**（§8：disposition/附件/章节/
+> muxdelay/rotation-DV 警告/输出校验管线 + E2E 扩至 T5–T9），新增**永久
+> 回归守卫** `.github/workflows/timeline-regression.yml`（main push + 所有
+> PR 触发；单测断言命令形态、`scripts/verify-timeline.sh` 断言真实 ffmpeg
+> 行为）——时间轴修复被回退会直接红。
 > 状态（2026-08-21）：**修复已落地（main 1d4478c）并经 CI 验证通过**——
 > Verify timeline #1：单测 + E2E 矩阵 T1–T4 全 PASS（ubuntu-latest，
 > ffmpeg 6.1.1-3ubuntu5）；Android CI #66 同提交全绿。临时验证 workflow
@@ -127,6 +132,62 @@ ffmpeg-kit-min 2.2.2 内置 setts（`libavcodec.so` 导出，已用 strings 验�
   在 ~1 个时基刻度内，实测尾超 0.04~0.28s 均来自音频包尾部，可接受。
 - 真机回归项（与上一修复合并跟踪）：aac 且 start_time<0 的真实片源、
   Cues 稀疏（非每 KF 一条）的片源。
+
+## 8. 加固批次（轨道保真 + 输出校验管线）
+
+在时间轴修复之上吸收的外部 spec 增量（其中该 spec 的"make_zero 恒定/
+-ss 恒传"主张与本文件 §4 的实证结论相反，以本文件为准）：
+
+### 8.1 命令模板新增（buildCommand）
+
+| 参数 | 修的问题（实测复现号） | 门控 |
+|------|----------------------|------|
+| `-disposition:a:0 default`（其余音轨清 0） | 丢默认音轨后 copy 继承 disposition → 成片无 default 轨，依赖自动选轨的播放器"剪完没声音"（T5） | 保留音轨 ≥1 |
+| `-map 0:t?` | MKV 附件（ASS 字幕字体/封面）整轨丢失 → 字幕排版/字体全毁（T6） | 仅 matroska 非 webm |
+| `-map_chapters 0` | 章节保留并随切点自动平移（显式声明意图；实测 T6 首章平移到 0） | 恒定 |
+| `-muxdelay 0 -muxpreload 0` | mpegts 默认 muxdelay 使成片 start_time=1.4s（T8 复现/修复对照） | 仅 TS/PS 系输出 |
+
+### 8.2 输出校验管线（assessTimeline + runTrimVerified）
+
+每个输出成功后跑 ffprobe（只读容器头）做四项断言：起点归零（\|st\|≤0.1s，
+TS 系放宽 1.6s）、时长准确（±2s，同时覆盖字幕拖尾与 -t 锚定错误）、保留的
+视频/音频流必须在输出里（防假成功空壳）。**失败且本轮用过字幕钳制 bsf 时
+先去 bsf 降级重跑一次**——钳制是加固项不是必需项，exotic 字幕轨上 bsf
+翻车不应让整个文件失败（最坏退回"结尾可能拖尾"的旧行为）。
+
+### 8.3 探测与警告（非阻断，结果页琥珀色提示）
+
+- **rotation**：解析 side_data Display Matrix（StreamInfo.rotation）。mp4→mp4
+  无损保留；mp4→mkv 在 ffmpeg≥6.1 数据层面也保留（Projection 元素，T7
+  实测），但部分播放器不识别 → 提示"可能横屏显示，建议 MP4 输出"。
+- **Dolby Vision**：codec_name/codec_tag 命中 dvh1/dvhe/dva1/dvav。无损
+  保留原样，非 DV 设备可能偏色/黑屏 → 提示（DV P5/P8 无损路径无解；
+  P7 理论上可丢 EL 轨转纯 HDR10，片源罕见暂不做）。
+- HDR10+ 的动态元数据在 SEI 里 copy 原样保留、不认识的老设备优雅降级为
+  静态 HDR10，无需提示。
+
+### 8.4 E2E 扩展（T5–T9，scripts/verify-timeline.sh）
+
+| # | 场景 | 断言 |
+|---|------|------|
+| T5 | 双音轨源丢默认轨 | 旧命令 default=0 复现；新命令 default=1 |
+| T6 | 附件 + 章节 | 附件流保留 ≥1；首章平移到 0、次章起点随切点平移 |
+| T7 | 旋转元数据 | mp4→mkv / mp4→mp4 两侧 rotation 均保留 |
+| T8 | TS 源 | TS→MKV 归零；TS→TS 无 muxdelay 复现 1.4s 偏移、加参数归零 |
+| T9 | VFR 源（select 造非均匀网格） | 剪切归零、时长正确、解码零错误 |
+
+T5–T9 全部附带 `ffmpeg -v error` 解码扫描（残缺 GOP/时间戳坏档会现形）。
+
+## 9. 回归守卫
+
+`.github/workflows/timeline-regression.yml`（main push + 所有 PR +
+手动触发）双防线：
+
+1. **单测**（TrimCommandTest，18 用例）：直接断言 buildCommand 产出的
+   参数形态——改坏命令生成逻辑即红；
+2. **E2E**（scripts/verify-timeline.sh，T1–T9）：真实 ffmpeg 验证命令
+   形态的实际输出——错误参数即使编译通过也会现形（T1/T3/T5/T8 各含
+   "旧命令复现"对照，防止断言退化为恒真）。
 
 [mkv-bframe-seek-offset.md]: ./mkv-bframe-seek-offset.md
 [mifi/lossless-cut]: https://github.com/mifi/lossless-cut

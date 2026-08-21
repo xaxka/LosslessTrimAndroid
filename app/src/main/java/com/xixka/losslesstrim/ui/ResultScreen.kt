@@ -28,6 +28,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.xixka.losslesstrim.data.FileResult
@@ -199,6 +200,16 @@ private fun ResultRow(r: FileResult) {
                 r.reason,
                 style = MaterialTheme.typography.labelSmall,
                 color = BlExt.textSecondary,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        // 成功但有兼容性风险的非阻断提示（旋转元数据/Dolby Vision 等）
+        if (r.warnings.isNotEmpty()) {
+            Text(
+                r.warnings.joinToString("\n"),
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFFB58500),
                 maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
             )

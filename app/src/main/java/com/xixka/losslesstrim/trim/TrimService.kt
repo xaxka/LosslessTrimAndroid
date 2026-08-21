@@ -35,6 +35,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import java.io.File
 import java.util.Locale
 import kotlin.coroutines.resume
+import kotlin.math.abs
 
 /**
  * 前台服务：串行执行无损剪辑队列。
@@ -147,6 +148,101 @@ class TrimService : Service() {
         /** 保留轨道中是否含字幕流（决定是否追加字幕钳制 bsf） */
         fun hasKeptSubtitle(probe: ProbeResult, kept: List<Int>): Boolean =
             probe.streams.any { it.isSubtitle && it.index in kept }
+
+        /**
+         * 音轨 disposition 重设：把输出第一音轨标 default、其余清零。
+         *
+         * 根因（实测复现）：源第一音轨带 default 标志，用户勾掉它只留第二条时，
+         * -c copy 原样继承 disposition → 成片里**没有任何** default 音轨，
+         * 依赖"选 default 轨"自动选轨逻辑的播放器（电视盒/Android TV/OEM
+         * 播放器）不选任何音轨，用户感知"剪出来没声音"。
+         *
+         * 输出侧音轨序 = -map 顺序（kept 升序）中音轨的相对位置。
+         * 字幕不设 default（分享场景强制弹字幕不友好，LosslessCut 同款约定）。
+         */
+        fun dispositionArgs(probe: ProbeResult, kept: List<Int>): String {
+            val keptAudio = probe.streams
+                .filter { it.isAudio && it.index in kept }
+                .sortedBy { it.index }
+            if (keptAudio.isEmpty()) return ""
+            return buildString {
+                append(" -disposition:a:0 default")
+                for (i in 1 until keptAudio.size) append(" -disposition:a:").append(i).append(" 0")
+            }
+        }
+
+        /**
+         * MKV 输出保留附件轨（`-map 0:t?`，`?`=无附件时不报错）：ASS 字幕的
+         * 字体、封面等挂在 attachment 流上，不显式 map 会整轨丢失——ASS 特效
+         * 字幕没字体时排版/字体全毁，用户感知"字幕剪坏了"。
+         * webm 不加：webm profile 严格校验流类型，附件会被拒。
+         */
+        fun attachmentArgs(target: OutputTarget): String =
+            if (target.muxer == "matroska" && target.ext != "webm") " -map 0:t?" else ""
+
+        /**
+         * TS/PS 系容器初始偏移参数：mpegts 默认 muxdelay 会让成片 start_time
+         * =1.4s（实测），清零后 0.000，校验管线才能用统一严格阈值。
+         */
+        fun muxDelayArgs(target: OutputTarget): String =
+            if (target.muxer == "mpegts" || target.muxer == "mpeg") " -muxdelay 0 -muxpreload 0" else ""
+
+        /**
+         * 成功但有兼容风险的非阻断提示（纯函数，单测覆盖）：
+         * 1. 旋转元数据 × MKV 输出：数据层面 ffmpeg≥6.1 会写 Projection 元素
+         *    保留，但部分播放器（硬解播放器/旧 Android）不识别 → 横屏显示；
+         * 2. Dolby Vision：无损保留原样，但非 DV 设备播放可能偏色/黑屏。
+         */
+        fun timelineWarnings(probe: ProbeResult, kept: List<Int>, target: OutputTarget): List<String> {
+            val w = ArrayList<String>()
+            val keptVideo = probe.streams.filter { it.isVideo && it.index in kept }
+            val rotated = keptVideo.any { ((it.rotation ?: 0) % 360 + 360) % 360 != 0 }
+            if (rotated && target.muxer == "matroska") {
+                w += "源含旋转元数据，部分播放器不识别 MKV 旋转标记可能横屏显示；如遇此问题建议 MP4 输出"
+            }
+            if (keptVideo.any { it.isDolbyVision }) {
+                w += "源为 Dolby Vision，非 DV 设备播放可能偏色/黑屏（内容无损保留原样）"
+            }
+            return w
+        }
+
+        /**
+         * 输出时间轴校验（纯函数，单测覆盖）。返回问题列表，空=通过。
+         *
+         * - 起点：|start_time| ≤ [startToleranceSec]（默认 0.1s）——防"时间不
+         *   从 0 开始"类回归（make_zero 误用/-t 锚定漂移）；TS 系由调用方放宽
+         *   （muxdelay 清零后仍可能有小 PCR 前导）。
+         * - 时长：|duration − 期望| ≤ [DURATION_TOLERANCE_SEC]——同时覆盖字幕
+         *   拖尾（容器被长 cue 撑大，实测 30s 成片显示 40s）与 -t 计算错误。
+         * - 流存在性：保留的视频/音频流必须在输出里——防 -map/容器兼容翻车
+         *   产生"假成功"空壳（ffmpeg 越界 seek 时退出码可能仍为 0）。
+         */
+        fun assessTimeline(
+            start: Double?,
+            dur: Double?,
+            expectedDurSec: Double,
+            hasVideo: Boolean,
+            hasAudio: Boolean,
+            videoKept: Boolean,
+            audioKept: Boolean,
+            startToleranceSec: Double = 0.1,
+        ): List<String> {
+            val issues = ArrayList<String>()
+            when {
+                start == null -> issues += "起始时间未知"
+                start < -startToleranceSec || start > startToleranceSec ->
+                    issues += "起点未归零(start=${Formats.secs3(start)}s)"
+            }
+            if (dur == null || abs(dur - expectedDurSec) > DURATION_TOLERANCE_SEC) {
+                issues += "时长异常(${dur?.let { Formats.secs3(it) } ?: "?"}s，期望约${Formats.secs3(expectedDurSec)}s)"
+            }
+            if (videoKept && !hasVideo) issues += "输出缺少视频流"
+            if (audioKept && !hasAudio) issues += "输出缺少音频流"
+            return issues
+        }
+
+        /** 时长校验容差（秒）：GOP 对齐后实际时长与计划值的合法偏差上限 */
+        const val DURATION_TOLERANCE_SEC = 2.0
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -364,7 +460,6 @@ class TrimService : Service() {
                 entry, plan, Outcome.FAILED, entry.sizeBytes,
                 reason = "无法定位源文件路径（未授予\u201c所有文件\u201d权限？SAF 通道已移除，授权后请重扫）"
             )
-        val durSec = plan.duration
 
         // ---- 单文件模式：直接写另存目标（无目录写权限，不走 .part/rename） ----
         // 直路径写出：绕开 saf: 只写描述符——faststart 收尾要回 seek 移数据重写
@@ -376,12 +471,8 @@ class TrimService : Service() {
                     entry, plan, Outcome.FAILED, entry.sizeBytes,
                     reason = "另存目标无法定位为本地路径（未授权或非本地存储），SAF 通道已移除"
                 )
-            val cmd = buildCommand(inParam, outFile.absolutePath, plan, kept, target, entry)
-            val session = runFfmpeg(cmd) { timeMs, speed ->
-                val p = (timeMs / 1000.0 / durSec).toFloat().coerceIn(0f, 1f)
-                publishRunning(idx, total, entry.name, p, String.format(Locale.US, "%.1fx", speed))
-            }
-            val rc = session?.returnCode
+            val run = runTrimVerified(inParam, outFile.absolutePath, plan, kept, target, entry, idx, total)
+            val rc = run.session?.returnCode
             if (rc == null) {
                 outFile.delete()
                 return FileResult(entry, plan, Outcome.FAILED, entry.sizeBytes, reason = "ffmpeg 会话异常结束")
@@ -392,21 +483,25 @@ class TrimService : Service() {
             }
             if (!rc.isValueSuccess) {
                 outFile.delete()
-                return FileResult(entry, plan, Outcome.FAILED, entry.sizeBytes, reason = extractError(session))
+                return FileResult(entry, plan, Outcome.FAILED, entry.sizeBytes, reason = extractError(run.session!!))
             }
             val newSize = outFile.length().coerceAtLeast(0)
-            // 轻量终检：只读容器头（hev1 内嵌参数集的 HEVC 全量 -show_streams 会读码流包）
-            val outProbe = Probe.verifyMedia(outFile.absolutePath)
-            if (newSize <= 0 || !outProbe.probeOk) {
+            // 时间轴校验问题（起点/时长/流存在性）在 runTrimVerified 内已含降级重跑
+            val issues = run.issues.orEmpty()
+            if (newSize <= 0 || issues.isNotEmpty()) {
                 outFile.delete()
                 return FileResult(
                     entry, plan, Outcome.FAILED, entry.sizeBytes,
-                    reason = "输出校验失败（${outProbe.error ?: "空文件"}），请重试"
+                    reason = "输出校验失败（${issues.firstOrNull() ?: "空文件"}），请重试"
                 )
             }
             publishRunning(idx + 1, total, entry.name, 1f, "")
             refreshMediaStore(outFile.absolutePath)
-            return FileResult(entry, plan, Outcome.SUCCESS, entry.sizeBytes, newSize, reason = "已另存为新文件")
+            return FileResult(
+                entry, plan, Outcome.SUCCESS, entry.sizeBytes, newSize,
+                reason = "已另存为新文件",
+                warnings = timelineWarnings(entry.probe, kept, target),
+            )
         }
 
         // ---- 目录模式：输出目录（直路径）与目标文件名 ----
@@ -438,11 +533,8 @@ class TrimService : Service() {
         val partFile = File(outDirFile, "$finalName.part")
         if (partFile.exists()) partFile.delete()
 
-        val cmd = buildCommand(inParam, partFile.absolutePath, plan, kept, target, entry)
-        val session = runFfmpeg(cmd) { timeMs, speed ->
-            val p = (timeMs / 1000.0 / durSec).toFloat().coerceIn(0f, 1f)
-            publishRunning(idx, total, entry.name, p, String.format(Locale.US, "%.1fx", speed))
-        }
+        val run = runTrimVerified(inParam, partFile.absolutePath, plan, kept, target, entry, idx, total)
+        val session = run.session
 
         val rc = session?.returnCode
         if (rc == null) {
@@ -455,7 +547,17 @@ class TrimService : Service() {
         }
         if (!rc.isValueSuccess) {
             partFile.delete()
-            return FileResult(entry, plan, Outcome.FAILED, entry.sizeBytes, reason = extractError(session))
+            return FileResult(entry, plan, Outcome.FAILED, entry.sizeBytes, reason = extractError(session!!))
+        }
+        // 时间轴校验问题（起点/时长/流存在性）：降级重跑已在 runTrimVerified 内完成，
+        // 仍不过说明输出真有问题，不进入替换原片的流程
+        val timelineIssues = run.issues.orEmpty()
+        if (timelineIssues.isNotEmpty()) {
+            partFile.delete()
+            return FileResult(
+                entry, plan, Outcome.FAILED, entry.sizeBytes,
+                reason = "输出校验失败（${timelineIssues.joinToString("；")}），请重试"
+            )
         }
 
         // 成功：替换文件（铁律：备份未做成绝不动原片；最终文件未校验绝不删备份）
@@ -515,7 +617,10 @@ class TrimService : Service() {
         if (s.overwrite) refreshMediaStore(finalFile.absolutePath, origFile.absolutePath)
         else refreshMediaStore(finalFile.absolutePath)
         publishRunning(idx + 1, total, entry.name, 1f, "")
-        return FileResult(entry, plan, Outcome.SUCCESS, entry.sizeBytes, finalLen)
+        return FileResult(
+            entry, plan, Outcome.SUCCESS, entry.sizeBytes, finalLen,
+            warnings = timelineWarnings(entry.probe, kept, target),
+        )
     }
 
     /** CutVideos 子目录（直路径）：已存在直接复用，否则 mkdirs 创建 */
@@ -568,6 +673,79 @@ class TrimService : Service() {
         }
     }
 
+    /** 单次剪辑执行结果：issues=null 表示 ffmpeg 未成功（调用方按会话 rc 分支处理） */
+    private class TrimRun(val session: FFmpegSession?, val issues: List<String>?)
+
+    /**
+     * 执行剪辑 + 输出时间轴校验（含降级重跑）。
+     *
+     * 成功路径（rc=success）跑 [verifyOutputTimeline]；有问题且本轮用过字幕
+     * 钳制 bsf 时，去掉 bsf 重跑一次——钳制是加固项不是必需项：exotic 字幕
+     * 轨上 bsf 翻车不应让整个文件失败，降级后最坏回退为"结尾可能拖尾"的
+     * 旧行为（可接受），远好于直接失败。二次仍失败才交给调用方判 FAILED。
+     */
+    private suspend fun runTrimVerified(
+        inParam: String,
+        outParam: String,
+        plan: TrimPlan,
+        kept: List<Int>,
+        target: OutputTarget,
+        entry: VideoEntry,
+        idx: Int,
+        total: Int,
+    ): TrimRun {
+        val durSec = plan.duration
+        val useBsf = hasKeptSubtitle(entry.probe, kept)
+
+        suspend fun once(clampSubtitles: Boolean): TrimRun {
+            val cmd = buildCommand(inParam, outParam, plan, kept, target, entry, clampSubtitles)
+            val session = runFfmpeg(cmd) { timeMs, speed ->
+                val p = (timeMs / 1000.0 / durSec).toFloat().coerceIn(0f, 1f)
+                publishRunning(idx, total, entry.name, p, String.format(Locale.US, "%.1fx", speed))
+            }
+            val rc = session?.returnCode
+            if (rc == null || !rc.isValueSuccess) return TrimRun(session, null)
+            return TrimRun(session, verifyOutputTimeline(outParam, plan, kept, entry, target))
+        }
+
+        val first = once(useBsf)
+        if (first.issues != null && first.issues.isNotEmpty() && useBsf) {
+            val second = once(false)
+            if (second.issues != null && second.issues.isEmpty()) return second
+            return second
+        }
+        return first
+    }
+
+    /**
+     * 输出时间轴校验：ffprobe 只读容器头（大文件也秒回）。TS/PS 系起点阈值
+     * 放宽到 1.6s（muxdelay 已清零，但 PCR 前导仍有小偏移；广播流普遍如此，
+     * 播放器按相对时间轴播放无感）。
+     */
+    private suspend fun verifyOutputTimeline(
+        path: String,
+        plan: TrimPlan,
+        kept: List<Int>,
+        entry: VideoEntry,
+        target: OutputTarget,
+    ): List<String> {
+        val probe = Probe.probeMediaPath(path)
+        if (!probe.probeOk) return listOf("输出无法解析（${probe.error ?: "?"}）")
+        val videoKept = entry.probe.streams.any { it.isVideo && it.index in kept }
+        val audioKept = entry.probe.streams.any { it.isAudio && it.index in kept }
+        val tsFamily = target.muxer == "mpegts" || target.muxer == "mpeg" || target.muxer == "asf"
+        return assessTimeline(
+            start = probe.startTimeSec,
+            dur = probe.durationSec,
+            expectedDurSec = plan.duration,
+            hasVideo = probe.streams.any { it.isVideo },
+            hasAudio = probe.streams.any { it.isAudio },
+            videoKept = videoKept,
+            audioKept = audioKept,
+            startToleranceSec = if (tsFamily) 1.6 else 0.1,
+        )
+    }
+
     private fun buildCommand(
         inParam: String,
         outParam: String,
@@ -575,11 +753,13 @@ class TrimService : Service() {
         kept: List<Int>,
         target: OutputTarget,
         entry: VideoEntry,
+        clampSubtitles: Boolean = true,
     ): String {
         // -ss 补偿见 [seekFudgeSec]；-t 锚定在 -ss 值上（停止条件 pts ≥ ss+t），
         // 须同步减去同量，终点才能仍落在 actualEnd。片头剪切不传 -ss（见
         // [seekArgs]）、不传 make_zero（见 [avoidNegativeTsArgs]）；字幕时长
-        // 钳制见 [subtitleClampBsf]。
+        // 钳制见 [subtitleClampBsf]（clampSubtitles=false 为校验失败后的降级
+        // 重跑路径）；disposition/附件/章节/muxdelay 见各函数注释。
         val fudge = seekFudgeSec(plan.actualStart, entry.probe)
         val ss = plan.actualStart + fudge
         val dur = (plan.actualEnd - ss).coerceAtLeast(0.001)
@@ -589,11 +769,14 @@ class TrimService : Service() {
         sb.append(" -i \"").append(inParam).append("\"")
         sb.append(" -t ").append(Formats.secs3(dur))
         for (i in kept) sb.append(" -map 0:").append(i)
-        sb.append(" -c copy -map_metadata 0")
+        sb.append(attachmentArgs(target))
+        sb.append(" -c copy -map_metadata 0 -map_chapters 0")
         sb.append(avoidNegativeTsArgs(ss))
-        if (hasKeptSubtitle(entry.probe, kept)) {
+        if (clampSubtitles && hasKeptSubtitle(entry.probe, kept)) {
             sb.append(" -bsf:s ").append(subtitleClampBsf(dur))
         }
+        sb.append(dispositionArgs(entry.probe, kept))
+        sb.append(muxDelayArgs(target))
         if (target.muxer == "mp4") sb.append(" -movflags +faststart")
         sb.append(" -f ").append(target.muxer)
         sb.append(" \"").append(outParam).append("\"")

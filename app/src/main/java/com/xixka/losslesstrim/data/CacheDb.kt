@@ -301,6 +301,8 @@ object ProbeStore {
             s.height?.let { o.put("height", it) }
             o.put("attachedPic", s.attachedPic)
             s.hasBFrames?.let { o.put("hasBFrames", it) }
+            s.rotation?.let { o.put("rotation", it) }
+            s.codecTag?.let { o.put("codecTag", it) }
             arr.put(o)
         }
         return arr.toString()
@@ -325,6 +327,8 @@ object ProbeStore {
                     attachedPic = o.optBoolean("attachedPic", false),
                     // 旧缓存行无此字段 → null（未知），消费侧按"含 B 帧"处理
                     hasBFrames = if (o.has("hasBFrames")) o.optInt("hasBFrames") else null,
+                    rotation = if (o.has("rotation")) o.optInt("rotation") else null,
+                    codecTag = o.optString("codecTag").takeIf { it.isNotEmpty() },
                 )
             )
         }

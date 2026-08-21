@@ -575,6 +575,8 @@ object Probe {
                         height = if (s.has("height")) s.optInt("height") else null,
                         attachedPic = (disp?.optInt("attached_pic", 0) ?: 0) == 1,
                         hasBFrames = if (s.has("has_b_frames")) s.optInt("has_b_frames") else null,
+                        rotation = parseRotation(s.optJSONArray("side_data_list")),
+                        codecTag = parseCodecTag(s.optString("codec_tag_string")),
                     )
                 )
                 if (duration == null) {
@@ -596,6 +598,27 @@ object Probe {
             ProbeResult(probeOk = false, error = "JSON 解析失败: ${e.message}")
         }
     }
+
+    /**
+     * 解析 side_data_list 里的显示旋转角度（side_data_type == "Display Matrix"
+     * 的 rotation 字段，度）。mp4 存 tkhd display matrix；mkv 由 ffmpeg≥6.1 写
+     * Projection 元素，两侧 ffprobe 都以此 side_data 形式上报。
+     */
+    private fun parseRotation(sideDataList: org.json.JSONArray?): Int? {
+        if (sideDataList == null) return null
+        for (i in 0 until sideDataList.length()) {
+            val sd = sideDataList.optJSONObject(i) ?: continue
+            if (sd.optString("side_data_type") == "Display Matrix" && sd.has("rotation")) {
+                return sd.optInt("rotation")
+            }
+        }
+        return null
+    }
+
+    /** codec_tag_string 清掉 \0 填充与 ffprobe 的占位形态（"[0][0][0][0]"） */
+    private fun parseCodecTag(raw: String): String? =
+        raw.trim { it == '\u0000' || it == ' ' }
+            .takeIf { it.isNotEmpty() && !it.startsWith("[") }
 
     /**
      * 解析 `-show_entries packet=pts_time,flags -of csv=p=0` 的单行输出：

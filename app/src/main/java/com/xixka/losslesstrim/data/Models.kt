@@ -3,6 +3,13 @@ package com.xixka.losslesstrim.data
 import android.net.Uri
 
 /** 单个媒体轨道（对应 ffprobe -show_streams 的一条流） */
+
+/** Dolby Vision 的 codec_name 直接形态（部分封装直接作为 codec 名上报） */
+private val DV_CODEC_NAMES = setOf("dvh1", "dvhe", "dva1", "dvav")
+
+/** Dolby Vision 的 mp4 codec_tag 形态（codec_name 报 hevc/avc 时靠 tag 区分） */
+private val DV_CODEC_TAGS = setOf("dvh1", "dvhe", "dva1", "dvav")
+
 data class StreamInfo(
     val index: Int,            // 全局流索引（-map 0:index 用）
     val codecType: String,     // video / audio / subtitle / data / attachment
@@ -17,11 +24,26 @@ data class StreamInfo(
     // 视频重排缓冲大小（ffprobe has_b_frames，>0 即含 B 帧）；null=未知（旧缓存行/
     // 平台 MediaExtractor 兜底），见 docs/mkv-bframe-seek-offset.md §7
     val hasBFrames: Int? = null,
+    // 显示旋转角度（度，来自 side_data "Display Matrix"；0/360 的倍数=无旋转）。
+    // null=未知（旧缓存行）。MKV 侧 ffmpeg≥6.1 写 Projection 元素可保留数据，
+    // 但部分播放器不识别 → 转 MKV 时结果页提示兼容风险
+    val rotation: Int? = null,
+    // ffprobe codec_tag_string（清掉 \0 填充后），用于识别 Dolby Vision
+    // （dvh1/dvhe/dva1/dvav；codec_name 对 DV 仍报 hevc/avc，靠 tag 区分）
+    val codecTag: String? = null,
 ) {
     val isVideo: Boolean get() = codecType == "video" && !attachedPic
     val isAudio: Boolean get() = codecType == "audio"
     val isSubtitle: Boolean get() = codecType == "subtitle"
     val isCover: Boolean get() = codecType == "video" && attachedPic
+
+    /**
+     * Dolby Vision 流（mp4/mov 里 tag 为 dvh1/dvhe/dva1/dvav；mkv 的 DV 无
+     * 专属 tag，识别不了——可探测面即 mp4 系，恰是手机拍摄 DV 的主形态）。
+     * 转封装无损保留，但非 DV 设备播放可能偏色/黑屏 → 结果页提示。
+     */
+    val isDolbyVision: Boolean
+        get() = codecName in DV_CODEC_NAMES || codecTag in DV_CODEC_TAGS
 
     /** 轨道列表展示文本 */
     fun label(): String {
@@ -122,4 +144,6 @@ data class FileResult(
     val origSize: Long,
     val newSize: Long = 0L,
     val reason: String? = null,
+    /** 成功但有兼容性风险的非阻断提示（旋转元数据/Dolby Vision 等），结果页展示 */
+    val warnings: List<String> = emptyList(),
 )
