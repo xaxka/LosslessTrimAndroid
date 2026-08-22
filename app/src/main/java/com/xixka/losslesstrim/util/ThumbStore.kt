@@ -409,7 +409,10 @@ object ThumbStore {
         // 代价：去掉 -skip_frame nokey 后解码量增加（需解 P/B 帧到目标位置），
         //   但单帧抽取只解到目标帧即停，实际增量约 0.1-0.3s，可接受。
         val common = "-hide_banner -loglevel info -err_detect ignore_err -threads 1"
-        val vf = "scale='min($maxPx,iw)':-1,format=yuv420p"
+        // 滤镜链：scale 缩放 → 显式 bt709 colorspace 转换 → format 降 10→8 bit
+        // colorspace 滤镜解决 scale 输出 csp:gbr 与输入 bt709 不匹配问题
+        // （10-bit HEVC 解码后 filter context csp 为 gbr，导致颜色错乱/花屏）
+        val vf = "scale='min($maxPx,iw)':-1:in_color_matrix=bt709:out_color_matrix=bt709,format=yuv420p"
         val inputSeekCmd = "$common -ss $ssStr -i \"$path\" -an -sn -frames:v 1 -vf \"$vf\" -q:v 3 -pix_fmt yuvj420p -y \"${outFile.absolutePath}\""
         // 第 2 次 fallback（input-seek 失败时）：input-seek 到 (ss-30s) 然后输出侧精确
         // seek 到 ss。30s 间隔让 ffmpeg 顺序解码约 6 个 GOP（HEVC 4K 约 1-2s），稳过
