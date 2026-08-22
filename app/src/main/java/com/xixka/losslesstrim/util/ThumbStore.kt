@@ -396,32 +396,29 @@ object ThumbStore {
         val outFile = File(outDir, "ff_${System.currentTimeMillis()}_${Thread.currentThread().id}.jpg")
         val ss = (timeMs / 1000.0).coerceAtLeast(0.0)
         val ssStr = String.format(Locale.US, "%.3f", ss)
-        // === 缩略图抽帧策略（2026-08-22）===
+        // === 缩略图抽帧策略（2026-08-22 重构）===
+        // 根因：视频是 limited range (tv, Y:16-235)，JPEG 需要 full range (pc, 0-255)
+        // FFmpeg 默认不做 range 转换，直接把 limited range 数据塞进 JPEG → 颜色错乱/花屏
+        // 修复：scale 滤镜加 out_range=pc 做 limited→full range 转换
+        // 参考StackOverflow: https://stackoverflow.com/questions/74350828
+        //
         // 优先硬件解码（mediacodec），失败回退软件解码。
-        // 硬解：GPU 解 HEVC 快 5-10x，输出 NV12 8-bit，只需 scale 滤镜，不需要
-        //       colorspace/降位深。-skip_frame nokey 对 MediaCodec 无效（硬解不走
-        //       codec-level 跳帧），但硬解本身够快不需要跳帧。
-        // 软解：colorspace 滤镜做 10→8bit + YUV colorspace 转换 + full range，
-        //       -skip_frame nokey 只解关键帧加速，-threads 4 多线程。
+        // 硬解：GPU 解 HEVC 快 5-10x，输出 NV12 8-bit
+        // 软解：-skip_frame nokey 只解关键帧 + -threads 4 多线程
         // 回退链：hw-input-seek → hw-out-seek → sw-input-seek → sw-out-seek
 
         // --- 硬件解码命令 ---
-        // 硬解输出 NV12 8-bit (limited range tv)，mjpeg 需要 yuvj420p (full range pc)
-        // 必须用 colorspace 滤镜做 range 转换，否则 range 不匹配会产生色带/竖线花屏
-        // 不需要 format=yuv420p（硬解输出已是 8-bit），不需要 iall=auto（硬解已处理 colorspace）
         val hwCommon = "-hide_banner -loglevel info -err_detect ignore_err -hwaccel mediacodec -threads 4"
-        val hwVf = "scale='min($maxPx,iw)':-1,colorspace=all=bt709:range=pc"
-        val hwInputCmd = "$hwCommon -ss $ssStr -i \"$path\" -an -sn -frames:v 1 -vf \"$hwVf\" -pix_fmt yuvj420p -q:v 3 -y \"${outFile.absolutePath}\""
+        val hwVf = "scale='min($maxPx,iw)':-1:in_color_matrix=auto:out_color_matrix=bt709:out_range=pc"
+        val hwInputCmd = "$hwCommon -ss $ssStr -i \"$path\" -an -sn -frames:v 1 -vf \"$hwVf\" -q:v 3 -y \"${outFile.absolutePath}\""
         val preSec = (ss - 30.0).coerceAtLeast(0.0)
         val outDelta = ss - preSec
         val hwOutCmd = "$hwCommon -ss ${String.format(Locale.US, "%.3f", preSec)} -i \"$path\" " +
-                "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$hwVf\" -pix_fmt yuvj420p -q:v 3 -y \"${outFile.absolutePath}\""
+                "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$hwVf\" -q:v 3 -y \"${outFile.absolutePath}\""
 
         // --- 软件解码命令（硬解失败回退）---
         val swCommon = "-hide_banner -loglevel info -err_detect ignore_err -skip_frame nokey -threads 4"
-        // colorspace 滤镜：iall=auto 自动检测输入色彩空间，all=bt709 输出标准 bt709，
-        // range=pc 输出 full range 与 mjpeg 编码器匹配，format=yuv420p 降 8 bit
-        val swVf = "scale='min($maxPx,iw)':-1,colorspace=iall=auto:all=bt709:range=pc:format=yuv420p"
+        val swVf = "scale='min($maxPx,iw)':-1:in_color_matrix=auto:out_color_matrix=bt709:out_range=pc"
         val swInputCmd = "$swCommon -ss $ssStr -i \"$path\" -an -sn -frames:v 1 -vf \"$swVf\" -q:v 3 -y \"${outFile.absolutePath}\""
         val swOutCmd = "$swCommon -ss ${String.format(Locale.US, "%.3f", preSec)} -i \"$path\" " +
                 "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$swVf\" -q:v 3 -y \"${outFile.absolutePath}\""
