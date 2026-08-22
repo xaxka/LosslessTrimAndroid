@@ -278,17 +278,21 @@ object ThumbStore {
                 }
             }
         }
-        // 列表缩略图：常规 memCache → diskCache → 抽帧（platform 主路径）
+        // 列表缩略图：memCache → diskCache → ffmpeg 主路径 → platform 兜底
+        // 原先 platform 主路径在 HEVC 上系统性花屏（MMR 解码 10-bit HEVC 出错），
+        // 且 isBitmapHealthy 检测不出色调偏移/规则竖线类花屏。
+        // 改为 ffmpeg 主路径（软解颜色正确），platform 仅在 ffmpeg 失败时兜底。
+        // diskCache 仍有效：ffmpeg 生成的健康图会被缓存，二次进入秒出。
         withContext(Dispatchers.IO) { loadFromDisk(app, key) }?.let { return it }
         return listSemaphore.withPermit {
             withContext(Dispatchers.IO) {
                 memCache.get(key)
                     ?: loadFromDisk(app, key)   // 排队期间可能已被其它协程写入缓存
-                    ?: extractViaPlatform(app, uri, timeMs, maxPx)?.also { bmp ->
+                    ?: extractViaFfmpeg(app, uri, timeMs, maxPx)?.also { bmp ->
                         memCache.put(key, bmp)
                         saveToDisk(app, key, bmp)
-                    } ?: extractViaFfmpeg(app, uri, timeMs, maxPx)?.also { bmp ->
-                        // platform 失败/不健康 → ffmpeg 兜底（健康）正常缓存
+                    } ?: extractViaPlatform(app, uri, timeMs, maxPx)?.also { bmp ->
+                        // ffmpeg 失败（路径不可用/损坏文件）：platform 兜底
                         memCache.put(key, bmp)
                         saveToDisk(app, key, bmp)
                     } ?: run {
@@ -316,30 +320,20 @@ object ThumbStore {
         var unhealthy = false
         return try {
             mmr.setDataSource(context, uri)
-            // HEVC 视频跳过 platform：MediaMetadataRetriever 在 HEVC（尤其 10-bit）
-            // 上系统性花屏，isBitmapHealthy 检测不出色调偏移类花屏。
-            // 直接返回 null 走 ffmpeg 兜底（软解颜色正确）。
-            val mime = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE)
-            if (mime != null && mime.contains("hevc", ignoreCase = true)) {
-                // HEVC 跳过 platform：MMR 在 HEVC（尤其 10-bit）上系统性花屏，
-                // isBitmapHealthy 检测不出色调偏移类花屏。返回 null 走 ffmpeg。
-                null
+            val timeUs = timeMs * 1000L
+            val bmp = if (Build.VERSION.SDK_INT >= 27) {
+                mmr.getScaledFrameAtTime(
+                    timeUs, MediaMetadataRetriever.OPTION_CLOSEST, maxPx, maxPx
+                )
             } else {
-                val timeUs = timeMs * 1000L
-                val bmp = if (Build.VERSION.SDK_INT >= 27) {
-                    mmr.getScaledFrameAtTime(
-                        timeUs, MediaMetadataRetriever.OPTION_CLOSEST, maxPx, maxPx
-                    )
-                } else {
-                    val orig = mmr.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
-                    scaleAndRecycle(orig, maxPx)
-                }
-                if (bmp != null && isBitmapHealthy(bmp)) bmp else {
-                    // 不健康：典型表现是绿屏/粉红条带/绿红紫混合花屏
-                    unhealthy = bmp != null
-                    bmp?.recycle()
-                    null
-                }
+                val orig = mmr.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
+                scaleAndRecycle(orig, maxPx)
+            }
+            if (bmp != null && isBitmapHealthy(bmp)) bmp else {
+                // 不健康：典型表现是绿屏/粉红条带/绿红紫混合花屏
+                unhealthy = bmp != null
+                bmp?.recycle()
+                null
             }
         } catch (e: Exception) {
             recordFailure(FailureRecord(
@@ -419,11 +413,13 @@ object ThumbStore {
         // 代价：去掉 -skip_frame nokey 后解码量增加（需解 P/B 帧到目标位置），
         //   但单帧抽取只解到目标帧即停，实际增量约 0.1-0.3s，可接受。
         val common = "-hide_banner -loglevel info -err_detect ignore_err -threads 1"
-        // 滤镜链：scale 缩放 → 显式 bt709 colorspace 转换 → format 降 10→8 bit
-        // colorspace 滤镜解决 scale 输出 csp:gbr 与输入 bt709 不匹配问题
-        // （10-bit HEVC 解码后 filter context csp 为 gbr，导致颜色错乱/花屏）
-        val vf = "scale='min($maxPx,iw)':-1:in_color_matrix=bt709:out_color_matrix=bt709,format=yuv420p"
-        val inputSeekCmd = "$common -ss $ssStr -i \"$path\" -an -sn -frames:v 1 -vf \"$vf\" -q:v 3 -pix_fmt yuvj420p -y \"${outFile.absolutePath}\""
+        // 滤镜链：scale 缩放 → colorspace 滤镜做正确的 YUV colorspace + 降 10→8 bit
+        // 不用 format=yuv420p + -pix_fmt yuvj420p：range 不匹配（tv vs pc）会导致
+        // JPEG 解码时产生规则竖线/色带/块状花屏
+        // colorspace 滤镜：iall=auto 自动检测输入色彩空间，all=bt709 输出标准 bt709，
+        // range=pc 输出 full range 与 mjpeg 编码器匹配，format=yuv420p 降 8 bit
+        val vf = "scale='min($maxPx,iw)':-1,colorspace=iall=auto:all=bt709:range=pc:format=yuv420p"
+        val inputSeekCmd = "$common -ss $ssStr -i \"$path\" -an -sn -frames:v 1 -vf \"$vf\" -q:v 3 -y \"${outFile.absolutePath}\""
         // 第 2 次 fallback（input-seek 失败时）：input-seek 到 (ss-30s) 然后输出侧精确
         // seek 到 ss。30s 间隔让 ffmpeg 顺序解码约 6 个 GOP（HEVC 4K 约 1-2s），稳过
         // 直接 output-seek 整段（44 分钟视频要解 1-2 分钟）。input-seek 跳到 ss-30 的
@@ -432,7 +428,7 @@ object ThumbStore {
         val preSec = (ss - 30.0).coerceAtLeast(0.0)
         val outDelta = ss - preSec
         val outSeekCmd = "$common -ss ${String.format(Locale.US, "%.3f", preSec)} -i \"$path\" " +
-                "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$vf\" -q:v 3 -pix_fmt yuvj420p -y \"${outFile.absolutePath}\""
+                "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$vf\" -q:v 3 -y \"${outFile.absolutePath}\""
 
         return try {
             runFfmpegOnce(inputSeekCmd, path, timeMs, outFile)
