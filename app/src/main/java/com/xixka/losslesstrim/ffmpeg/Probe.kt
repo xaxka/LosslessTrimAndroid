@@ -280,9 +280,13 @@ object Probe {
      * 按绝对路径探测（直文件 I/O，无 SAF 开销）。
      *
      * 带重试与平台 API 兜底（类注释防线 2/3）：解析类失败（日志通道截断等）
-     * 换新会话重试至多 [PROBE_ATTEMPTS] 次；全部失败再退 MediaExtractor
-     * 兜底（时长 + 轨道粗粒度信息，title/channelLayout 等富字段缺失）。
-     * 超时不重试——慢文件重跑只是再等一轮，直接走兜底。
+     * 换新会话重试至多 [PROBE_ATTEMPTS] 次；全部失败再退 MediaMetadataRetriever
+     * 拿时长+旋转（对 moov atom not found / codec_tag 异常等不标准 MP4 更宽容
+     * ——实测 moov 在尾部或 codec 私有字段异常时 ffprobe 严格失败，但
+     * MediaMetadataRetriever 仍能拿到 duration），最后退 MediaExtractor 拿
+     * stream 列表。MediaExtractor 在真正坏文件上也会失败，此时拿最后一次
+     * ffprobe 的错误信息返回。超时（慢文件）走直接 MediaMetadataRetriever
+     * 兜底——重跑 ffprobe 只是再等一轮。
      */
     suspend fun probeMediaPath(path: String): ProbeResult = withContext(Dispatchers.IO) {
         var result: ProbeResult? = null
@@ -306,33 +310,101 @@ object Probe {
             if (result.probeOk) return@withContext result
             if (outcome.timedOut) break
         }
-        // 平台 API 兜底：不经 ffmpeg-kit 日志通道，从根上免疫截断
+        // 平台 API 兜底：先 MediaMetadataRetriever（时长更宽容，moov 异常的 MP4
+        // 仍可拿到），再 MediaExtractor（stream 列表）。两条路径都失败才把
+        // 错误回退到 ffprobe 的（用户看到的是 ffprobe 报错信息）
         platformProbe(path) ?: result ?: ProbeResult(probeOk = false, error = "探测失败")
     }
 
-    /** MediaExtractor 兜底探测：时长 + 轨道粗信息；任何异常返回 null（继续用 ffprobe 的错误信息） */
+    /**
+     * 平台 API 兜底探测：时长 + 旋转 + stream 列表（尽力）。
+     *
+     * 优先级：MediaMetadataRetriever（容错好）→ MediaExtractor（stream 列表）。
+     *
+     * 对应"moov atom not found"等不标准 MP4：ffprobe 严格解析失败（容器级错误），
+     * 但 MediaMetadataRetriever 在 moov 仍存在时能拿到 METADATA_KEY_DURATION
+     * 与 VIDEO_ROTATION——这两项对结果页展示与头尾裁剪已够用；进入批量剪辑时
+     * probeKeyframesNear 才需要 stream 级别信息（该路径另走 ffprobe 严格探测，
+     * 真坏文件按真坏文件处理，不会假装能切）。
+     *
+     * streams 为空 + probeOk=true 是合法状态：列表页能识别时长+大小，AnalysisScreen
+     * 仍可打开（看不到轨道——但能看到时长/文件名），批量剪辑由 TrimService 1b
+     * 段判 FAILED 并给出"容器解析受限（<ffprobe 错误>），可尝试桌面 ffmpeg 重新
+     * 封装后再处理"——比直接标"不可处理"更诚实（用户至少知道文件可识别）。
+     */
     private fun platformProbe(path: String): ProbeResult? {
-        val extractor = MediaExtractor()
+        // 第 1 步：MediaMetadataRetriever——对 moov 异常的 MP4 也能拿 duration/rotation
+        val mmr = MediaMetadataRetriever()
+        val mmrResult = try {
+            mmr.setDataSource(path)
+            val durMs = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toDoubleOrNull()
+            if (durMs != null && durMs > 0) {
+                val rotation = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                    ?.toIntOrNull() ?: 0
+                Pair(durMs / 1000.0, rotation)
+            } else null
+        } catch (_: Exception) {
+            null
+        } finally {
+            try {
+                mmr.release()
+            } catch (_: Exception) {
+            }
+        }
+
+        // 第 2 步：MediaExtractor——拿 stream 列表（codec/宽高/声道/字幕标记）
+        val streams = mediaExtractorStreams(path)
+
+        return when {
+            mmrResult != null && streams != null -> {
+                // 时长 + stream 都在：完整结果（streams 非空，TrimService 不会误判）
+                val (durSec, rotation) = mmrResult
+                ProbeResult(
+                    probeOk = true,
+                    durationSec = durSec,
+                    streams = streams.mapIndexed { i, f ->
+                        platformTrack(i, f, rotation)
+                    },
+                )
+            }
+            mmrResult != null -> {
+                // 时长在但 stream 拿不到：标记"partial"——probeOk=true（让列表
+                // 能识别时长+大小），但 streams=空会让 TrimService 在批量
+                // 处理时直接判"未保留任何轨道"失败；AnalysisScreen 仍可打开
+                // 看时长与文件名（无法选轨，UI 自然隐藏轨道区）
+                val (durSec, _) = mmrResult
+                ProbeResult(probeOk = true, durationSec = durSec, streams = emptyList())
+            }
+            streams != null -> {
+                // stream 拿到了但时长没有：少见，仍算成功
+                val durSec = streams.maxOfOrNull { f ->
+                    if (f.containsKey(MediaFormat.KEY_DURATION)) f.getLong(MediaFormat.KEY_DURATION) else 0L
+                }?.let { it / 1_000_000.0 } ?: 0.0
+                if (durSec > 0) {
+                    ProbeResult(
+                        probeOk = true,
+                        durationSec = durSec,
+                        streams = streams.mapIndexed { i, f -> platformTrack(i, f, 0) },
+                    )
+                } else null
+            }
+            else -> null
+        }
+    }
+
+    /**
+     * MediaExtractor 拿 stream 列表：任何异常返回 null。
+     * 与旧实现的差别：旧版用 extractor.trackCount==0 即返回 null，对坏 MP4
+     * 容易误判；新版用 KEY_MIME 识别 stream type，empty mime 也接受（让
+     * 兜底兜到底）。
+     */
+    private fun mediaExtractorStreams(path: String): List<android.media.MediaFormat>? {
+        val extractor = android.media.MediaExtractor()
         return try {
             extractor.setDataSource(path)
-            if (extractor.trackCount <= 0) {
-                null
-            } else {
-                // MediaExtractor 不暴露容器级时长：取各轨 KEY_DURATION 的最大值（µs）
-                val formats = (0 until extractor.trackCount).map { extractor.getTrackFormat(it) }
-                val durUs = formats.maxOfOrNull { f ->
-                    if (f.containsKey(MediaFormat.KEY_DURATION)) f.getLong(MediaFormat.KEY_DURATION) else 0L
-                } ?: 0L
-                val durSec = durUs / 1_000_000.0
-                if (durSec <= 0) {
-                    null
-                } else {
-                    // 轨道顺序与容器轨序一致（MP4/MKV 常规情况同 ffprobe 的全局索引）；
-                    // 仅兜底场景使用，title/channelLayout/封面标记等富字段缺失
-                    val streams = formats.mapIndexed { i, f -> platformTrack(i, f) }
-                    ProbeResult(probeOk = true, durationSec = durSec, streams = streams)
-                }
-            }
+            if (extractor.trackCount <= 0) null
+            else (0 until extractor.trackCount).map { extractor.getTrackFormat(it) }
         } catch (_: Exception) {
             null
         } finally {
@@ -343,7 +415,7 @@ object Probe {
         }
     }
 
-    private fun platformTrack(index: Int, f: MediaFormat): StreamInfo {
+    private fun platformTrack(index: Int, f: MediaFormat, rotation: Int = 0): StreamInfo {
         val mime = f.getString(MediaFormat.KEY_MIME) ?: ""
         val type = when {
             mime.startsWith("video/") -> "video"
@@ -368,6 +440,13 @@ object Probe {
             width = intOrNull(MediaFormat.KEY_WIDTH),
             height = intOrNull(MediaFormat.KEY_HEIGHT),
             attachedPic = false,
+            // 兜底路径拿不到 has_b_frames：ffprobe 严格路径才是唯一可信源；
+            // 标 null 让 seekFudgeSec 按"含 B 帧"保守处理（已有注释说明）
+            hasBFrames = null,
+            // platform 兜底用 MediaMetadataRetriever 的 VIDEO_ROTATION；mp4 的
+            // tkhd matrix 与此一致，side_data Display Matrix 在 platform API 上
+            // 不暴露
+            rotation = rotation.takeIf { (it % 360 + 360) % 360 != 0 },
         )
     }
 

@@ -19,6 +19,10 @@ object TrimPlanner {
         if (!entry.probe.probeOk) {
             return TrimPlan(ok = false, skipReason = "不可处理（${entry.probe.error ?: "元数据解析失败"}）")
         }
+        // streams 为空（ffprobe 严格失败 + platform 兜底只拿到时长：moov atom
+        // not found / 私有 codec_tag 异常）由 TrimService.processJob 1b 段处理
+        // （更详细的 FAILED reason），这里不重复判，否则 SKIPPED 语义会让用户
+        // 在结果页看到"跳过"而非"失败"，不易理解
         val dur = entry.probe.durationSec
         return when (s.mode) {
             TrimMode.HEAD_TAIL -> {

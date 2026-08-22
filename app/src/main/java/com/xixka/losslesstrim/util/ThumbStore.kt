@@ -7,6 +7,7 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.util.LruCache
+import com.antonkarpenko.ffmpegkit.FFmpegKit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -14,6 +15,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
+import java.util.Locale
 
 /**
  * 全局缩略图 / 抽帧缓存：内存 LruCache + 磁盘 JPEG 双层缓存。
@@ -111,20 +113,42 @@ object ThumbStore {
 
     // ---------------- 抽帧 ----------------
 
+    /**
+     * 抽帧：先尝试 platform MediaMetadataRetriever（快、不出进程），失败
+     * 或返回的 Bitmap 不健康（典型花屏：HEVC + B 帧 + 不标准 MP4 下 platform
+     * codec 偶发返回内部 native data 损坏的 Bitmap）时回退 ffmpeg 软解
+     * 抽帧（启动一个 ffmpeg 进程抽 1 帧到 JPEG 再读入——慢但稳定，不依赖
+     * 平台 codec 兼容性）。
+     *
+     * 选用 OPTION_CLOSEST 而非 OPTION_CLOSEST_SYNC：CLOSEST 返回离 timeMs
+     * 最近的可解码帧（不要求是 IDR），更贴近"切点附近的画面"；CLOSEST_SYNC
+     * 返回的是之前的最近关键帧，HEVC 5~10s GOP 距离下经常落在距离切点几秒
+     * 之外——预览与切点脱节，用户会感觉"切点抽帧不对"。
+     */
     private fun extract(context: Context, uri: Uri, timeMs: Long, maxPx: Int): Bitmap? {
+        val plat = extractViaPlatform(context, uri, timeMs, maxPx)
+        if (plat != null) return plat
+        return extractViaFfmpeg(context, uri, timeMs, maxPx)
+    }
+
+    /** platform API 抽帧（默认路径）；不健康时返回 null 以便 caller 回退 */
+    private fun extractViaPlatform(context: Context, uri: Uri, timeMs: Long, maxPx: Int): Bitmap? {
         val mmr = MediaMetadataRetriever()
         return try {
             mmr.setDataSource(context, uri)
             val timeUs = timeMs * 1000L
-            if (Build.VERSION.SDK_INT >= 27) {
-                // API 27+：直接取缩放帧，避免全尺寸 Bitmap 落堆
+            val bmp = if (Build.VERSION.SDK_INT >= 27) {
                 mmr.getScaledFrameAtTime(
-                    timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, maxPx, maxPx
+                    timeUs, MediaMetadataRetriever.OPTION_CLOSEST, maxPx, maxPx
                 )
             } else {
-                // API 26 兜底：取出全尺寸帧后立即缩放并回收原图（4K 帧约 33MB）
-                val orig = mmr.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                val orig = mmr.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
                 scaleAndRecycle(orig, maxPx)
+            }
+            if (bmp != null && isBitmapHealthy(bmp)) bmp else {
+                // 不健康：典型表现是绿屏/全黑/像素错位，caller 会回退 ffmpeg
+                bmp?.recycle()
+                null
             }
         } catch (e: Exception) {
             null
@@ -135,6 +159,87 @@ object ThumbStore {
             }
         }
     }
+
+    /**
+     * ffmpeg 软解抽帧（platform 失败/不健康时回退）。启动 ffmpeg 抽 1 帧 JPEG
+     * 到 cacheDir（每张几十 KB），再 BitmapFactory 解出，完事即删。绕开平台
+     * codec：HEVC/H.264/HDR10/部分自定义参数都走 ffmpeg 自带软解，bitmap
+     * 一定是解码完成的、不会出现"内部 native data 损坏"的绿屏。
+     *
+     * 输入必须是直路径（ffmpeg 不支持 SAF fd）：拿不到路径（云盘/未授权）
+     * 直接返回 null；AnalysisScreen 由 VideoPlayerPanel 的"该格式无法预览"
+     * 兜底，抽帧不显示仅少两张缩略图、不阻塞分析流程。
+     *
+     * 单次约 80~200ms：每分析页最多两张切点抽帧 + 拖动 200ms 防抖，可接受。
+     */
+    private fun extractViaFfmpeg(context: Context, uri: Uri, timeMs: Long, maxPx: Int): Bitmap? {
+        val path = StorageAccess.accessibleFile(context, uri)?.absolutePath ?: return null
+        val outDir = File(context.cacheDir, FFMPEG_THUMB_DIR)
+        if (!outDir.exists()) outDir.mkdirs()
+        val outFile = File(outDir, "ff_${System.currentTimeMillis()}_${Thread.currentThread().id}.jpg")
+        val ss = (timeMs / 1000.0).coerceAtLeast(0.0)
+        val scale = "scale='min($maxPx,iw)':-1"
+        // input-seek 模式：-ss 在 -i 前用 container index 快速定位（前提容器有
+        // 索引——MP4/MKV 都有；纯 MPEG-1/2/TS 等不索引容器下会回退为顺序读，
+        // 仍 OK，仅稍慢）；-an/-sn 跳过音频/字幕流的 demux 解码（不分配解复用
+        // 缓冲），避免少数容器在 input-seek 时把无关流也读一遍
+        val cmd = "-hide_banner -loglevel error -ss ${String.format(Locale.US, "%.3f", ss)} " +
+                "-i \"$path\" -an -sn -frames:v 1 -vf \"$scale\" -q:v 3 -y \"${outFile.absolutePath}\""
+        return try {
+            val session = FFmpegKit.execute(cmd)
+            val rc = session.returnCode
+            try {
+                if (rc != null && rc.isValueSuccess && outFile.exists() && outFile.length() > 0) {
+                    val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
+                    val bmp = BitmapFactory.decodeFile(outFile.absolutePath, opts)
+                    if (bmp != null && isBitmapHealthy(bmp)) bmp else {
+                        bmp?.recycle()
+                        null
+                    }
+                } else null
+            } finally {
+                try { outFile.delete() } catch (_: Exception) {}
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Bitmap 健康检测：platform MediaMetadataRetriever 在 HEVC + B 帧 + 不
+     * 标准 MP4（moov 在尾部、codec_tag 异常）上偶发返回 Bitmap 对象但内部
+     * native data 损坏——getPixel 拿到全 0x0000FF00（绿）或 0xFF000000（黑）
+     * 或部分撕裂。采样 5 个像素点，3 个及以上接近同一种"非自然色"判为花屏。
+     *
+     * 检测通过 → 接受；不通过 → recycle 并返回 false 让 caller 走 ffmpeg
+     * fallback。注意：短视频封面/纯黑片头在统计上不可能同时命中 3 点同色
+     * 阈值（任一点都是合法画面色），不会误杀。
+     */
+    private fun isBitmapHealthy(bmp: Bitmap): Boolean {
+        if (bmp.isRecycled || bmp.width <= 0 || bmp.height <= 0) return false
+        val w = bmp.width
+        val h = bmp.height
+        val pts = intArrayOf(
+            bmp.getPixel(w / 2, h / 2),
+            bmp.getPixel(w / 4, h / 2),
+            bmp.getPixel(3 * w / 4, h / 2),
+            bmp.getPixel(w / 2, h / 4),
+            bmp.getPixel(w / 2, 3 * h / 4),
+        )
+        fun isNear(c: Int, r: Int, g: Int, b: Int): Boolean {
+            val cr = (c shr 16) and 0xFF
+            val cg = (c shr 8) and 0xFF
+            val cb = c and 0xFF
+            return kotlin.math.abs(cr - r) < 8 && kotlin.math.abs(cg - g) < 8 && kotlin.math.abs(cb - b) < 8
+        }
+        val allGreen = pts.count { isNear(it, 0, 220, 0) } >= 3
+        val allBlack = pts.count { isNear(it, 0, 0, 0) } >= 3
+        val allBlue  = pts.count { isNear(it, 0, 0, 220) } >= 3
+        val allPurple = pts.count { isNear(it, 160, 0, 160) } >= 3
+        return !(allGreen || allBlack || allBlue || allPurple)
+    }
+
+    private const val FFMPEG_THUMB_DIR = "ffmpeg-thumb"
 
     private fun scaleAndRecycle(orig: Bitmap?, maxPx: Int): Bitmap? {
         if (orig == null) return null
@@ -171,10 +276,14 @@ object ThumbStore {
         if (!f.exists()) return null
         return try {
             val bmp = BitmapFactory.decodeFile(f.absolutePath)
-            if (bmp != null && !bmp.isRecycled) {
+            if (bmp != null && !bmp.isRecycled && isBitmapHealthy(bmp)) {
                 memCache.put(key, bmp)
                 bmp
             } else {
+                // 旧版（修复前）写入的损坏 JPEG：解码成功但内部花屏；
+                // 不入缓存、删文件让 caller 重新抽（platform→ffmpeg fallback）
+                bmp?.recycle()
+                try { f.delete() } catch (_: Exception) {}
                 null
             }
         } catch (e: Exception) {
