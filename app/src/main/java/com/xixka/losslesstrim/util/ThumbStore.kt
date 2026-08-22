@@ -113,8 +113,20 @@ object ThumbStore {
 
     /**
      * 异步加载：内存 → 磁盘 → 抽帧。
-     * 磁盘命中不需要排队（只是解一张小 JPEG），直接放行；
-     * 真正 expensive 的视频抽帧才进并发池，列表/预览各用各的池。
+     *
+     * 关键差异（按 [preview] 走两条路径）：
+     *
+     * - **切点预览（preview=true）**：必走 ffmpeg 软解，**不查 diskCache**。
+     *   原因：上一版 thumbnail 路径同时存 platform + ffmpeg 抽的图，platform 在
+     *   HEVC + B 帧 + 不标准 MP4 上系统性返回花屏（粉红条带 / 绿红紫混合等），
+     *   上一版 5 点单色检测识别不出这类花屏，坏图进 diskCache 后即使清缓存按钮
+     *   之后重抽仍可能命中旧坏图。preview 路径绕开 diskCache：每次进分析页
+     *   必走 ffmpeg 软解，绕开 platform codec 兼容性。100~200ms/张 + 拖动 200ms
+     *   防抖 = 用户感知 300~400ms 一次，可接受（花屏不能忍，慢一点可接受）。
+     *
+     * - **列表缩略图（preview=false）**：先 memCache → diskCache（健康检查）→
+     *   platform 主路径（快）→ 不健康则 ffmpeg 兜底。缩略图小（128x72dp），
+     *   偶发花屏对判断无影响；优先保持列表渲染流畅。
      */
     suspend fun thumb(
         context: Context,
@@ -127,14 +139,41 @@ object ThumbStore {
         memCache.get(key)?.let { return it }
         if (failed.get(key) != null) return null
         val app = context.applicationContext
-        // 磁盘缓存命中：不占用抽帧许可，即刻返回
+        if (preview) {
+            // 切点预览：绕开 diskCache（可能命中旧 platform 花屏 JPEG），直接 ffmpeg 软解
+            return previewSemaphore.withPermit {
+                withContext(Dispatchers.IO) {
+                    memCache.get(key) ?: run {
+                        val ffmpegBmp = extractViaFfmpeg(app, uri, timeMs, maxPx)
+                        if (ffmpegBmp != null) {
+                            memCache.put(key, ffmpegBmp)
+                            saveToDisk(app, key, ffmpegBmp)
+                            ffmpegBmp
+                        } else {
+                            // ffmpeg 失败（路径不可用）：platform 兜底，**只入 memCache**
+                            // 防止坏图污染 diskCache 供下次预览路径命中
+                            val platBmp = extractViaPlatform(app, uri, timeMs, maxPx)
+                            if (platBmp != null) memCache.put(key, platBmp)
+                            platBmp ?: run {
+                                failed.put(key, true)
+                                null
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 列表缩略图：常规 memCache → diskCache → 抽帧（platform 主路径）
         withContext(Dispatchers.IO) { loadFromDisk(app, key) }?.let { return it }
-        val sem = if (preview) previewSemaphore else listSemaphore
-        return sem.withPermit {
+        return listSemaphore.withPermit {
             withContext(Dispatchers.IO) {
                 memCache.get(key)
                     ?: loadFromDisk(app, key)   // 排队期间可能已被其它协程写入缓存
-                    ?: extract(app, uri, timeMs, maxPx)?.also { bmp ->
+                    ?: extractViaPlatform(app, uri, timeMs, maxPx)?.also { bmp ->
+                        memCache.put(key, bmp)
+                        saveToDisk(app, key, bmp)
+                    } ?: extractViaFfmpeg(app, uri, timeMs, maxPx)?.also { bmp ->
+                        // platform 失败/不健康 → ffmpeg 兜底（健康）正常缓存
                         memCache.put(key, bmp)
                         saveToDisk(app, key, bmp)
                     } ?: run {
@@ -148,24 +187,15 @@ object ThumbStore {
     // ---------------- 抽帧 ----------------
 
     /**
-     * 抽帧：先尝试 platform MediaMetadataRetriever（快、不出进程），失败
-     * 或返回的 Bitmap 不健康（典型花屏：HEVC + B 帧 + 不标准 MP4 下 platform
-     * codec 偶发返回内部 native data 损坏的 Bitmap）时回退 ffmpeg 软解
-     * 抽帧（启动一个 ffmpeg 进程抽 1 帧到 JPEG 再读入——慢但稳定，不依赖
-     * 平台 codec 兼容性）。
+     * platform API 抽帧（列表缩略图快路径，preview 不走）。
      *
-     * 选用 OPTION_CLOSEST 而非 OPTION_CLOSEST_SYNC：CLOSEST 返回离 timeMs
-     * 最近的可解码帧（不要求是 IDR），更贴近"切点附近的画面"；CLOSEST_SYNC
-     * 返回的是之前的最近关键帧，HEVC 5~10s GOP 距离下经常落在距离切点几秒
-     * 之外——预览与切点脱节，用户会感觉"切点抽帧不对"。
+     * 用 OPTION_CLOSEST（最近可解码帧）而非 CLOSEST_SYNC（前一个关键帧）：
+     * 后者在 HEVC 5~10s GOP 下经常跳到几秒外的关键帧。
+     *
+     * 返回 null 触发 ffmpeg 兜底：抽帧异常 / Bitmap 不健康（绿屏/单色/条带/
+     * 马赛克花屏——见 [isBitmapHealthy] 的 stddev 检测）。platform 在 HEVC +
+     * B 帧 + 不标准 MP4 上系统性偶发花屏，**单色检测已不能涵盖**。
      */
-    private fun extract(context: Context, uri: Uri, timeMs: Long, maxPx: Int): Bitmap? {
-        val plat = extractViaPlatform(context, uri, timeMs, maxPx)
-        if (plat != null) return plat
-        return extractViaFfmpeg(context, uri, timeMs, maxPx)
-    }
-
-    /** platform API 抽帧（默认路径）；不健康时返回 null 以便 caller 回退 */
     private fun extractViaPlatform(context: Context, uri: Uri, timeMs: Long, maxPx: Int): Bitmap? {
         val mmr = MediaMetadataRetriever()
         return try {
@@ -180,7 +210,7 @@ object ThumbStore {
                 scaleAndRecycle(orig, maxPx)
             }
             if (bmp != null && isBitmapHealthy(bmp)) bmp else {
-                // 不健康：典型表现是绿屏/全黑/像素错位，caller 会回退 ffmpeg
+                // 不健康：典型表现是绿屏/粉红条带/绿红紫混合花屏，caller 会回退 ffmpeg
                 bmp?.recycle()
                 null
             }
@@ -240,37 +270,75 @@ object ThumbStore {
     }
 
     /**
-     * Bitmap 健康检测：platform MediaMetadataRetriever 在 HEVC + B 帧 + 不
-     * 标准 MP4（moov 在尾部、codec_tag 异常）上偶发返回 Bitmap 对象但内部
-     * native data 损坏——getPixel 拿到全 0x0000FF00（绿）或 0xFF000000（黑）
-     * 或部分撕裂。采样 5 个像素点，3 个及以上接近同一种"非自然色"判为花屏。
+     * Bitmap 健康检测：8x8 网格采样 64 个像素点，统计 R/G/B 三通道标准差。
      *
-     * 检测通过 → 接受；不通过 → recycle 并返回 false 让 caller 走 ffmpeg
-     * fallback。注意：短视频封面/纯黑片头在统计上不可能同时命中 3 点同色
-     * 阈值（任一点都是合法画面色），不会误杀。
+     * 上一版用 5 点单色检测（绿/黑/蓝/紫），对条带/马赛克花屏（HEVC B 帧解
+     * 码错位的典型表现：粉红+白条带 / 绿红紫混合色块）识别不出——坏图通过检测
+     * 进入 diskCache 后即使清缓存按钮重抽仍可能命中。
+     *
+     * 新版用 64 点 stddev 检测：
+     * - **stddev < 3** = 全单色花屏（绿/黑/紫/红整片同色）
+     * - **stddev > 95** = 条带/马赛克花屏（相邻像素颜色剧变，正常画面中
+     *   同一通道的 stddev 通常 5~70；条带/棋盘格 stddev 普遍 90+）
+     * - 合法画面 stddev 通常 5~70（不同场景差异大）：浅色背景 stddev 5~30，
+     *   复杂画面 30~70，均落在正常范围
+     *
+     * 注：极端合法画面（全单色纯背景/重彩动画）可能误判"不健康"——列表缩略图
+     * 失败会显示占位符"加载中…"，UI 仍可继续；切点预览失败会显示占位符，分析
+     * 页其他要素（时间轴/视频预览）仍可用，宁可少图不要花屏。
      */
     private fun isBitmapHealthy(bmp: Bitmap): Boolean {
         if (bmp.isRecycled || bmp.width <= 0 || bmp.height <= 0) return false
         val w = bmp.width
         val h = bmp.height
-        val pts = intArrayOf(
-            bmp.getPixel(w / 2, h / 2),
-            bmp.getPixel(w / 4, h / 2),
-            bmp.getPixel(3 * w / 4, h / 2),
-            bmp.getPixel(w / 2, h / 4),
-            bmp.getPixel(w / 2, 3 * h / 4),
-        )
-        fun isNear(c: Int, r: Int, g: Int, b: Int): Boolean {
-            val cr = (c shr 16) and 0xFF
-            val cg = (c shr 8) and 0xFF
-            val cb = c and 0xFF
-            return kotlin.math.abs(cr - r) < 8 && kotlin.math.abs(cg - g) < 8 && kotlin.math.abs(cb - b) < 8
+        val n = 8
+        val stepX = (w / n).coerceAtLeast(1)
+        val stepY = (h / n).coerceAtLeast(1)
+        var rSum = 0L
+        var gSum = 0L
+        var bSum = 0L
+        val count = n * n
+        // 同时收集各通道原始值用于 stddev 计算（避免对每个像素两次访问）
+        val rArr = IntArray(count)
+        val gArr = IntArray(count)
+        val bArr = IntArray(count)
+        var idx = 0
+        for (sy in 0 until n) {
+            val y = (sy * stepY).coerceAtMost(h - 1)
+            for (sx in 0 until n) {
+                val x = (sx * stepX).coerceAtMost(w - 1)
+                val p = bmp.getPixel(x, y)
+                val r = (p shr 16) and 0xFF
+                val g = (p shr 8) and 0xFF
+                val b = p and 0xFF
+                rArr[idx] = r; gArr[idx] = g; bArr[idx] = b
+                rSum += r; gSum += g; bSum += b
+                idx++
+            }
         }
-        val allGreen = pts.count { isNear(it, 0, 220, 0) } >= 3
-        val allBlack = pts.count { isNear(it, 0, 0, 0) } >= 3
-        val allBlue  = pts.count { isNear(it, 0, 0, 220) } >= 3
-        val allPurple = pts.count { isNear(it, 160, 0, 160) } >= 3
-        return !(allGreen || allBlack || allBlue || allPurple)
+        val rMean = rSum.toDouble() / count
+        val gMean = gSum.toDouble() / count
+        val bMean = bSum.toDouble() / count
+        var rVar = 0.0
+        var gVar = 0.0
+        var bVar = 0.0
+        for (i in 0 until count) {
+            val dr = rArr[i] - rMean
+            val dg = gArr[i] - gMean
+            val db = bArr[i] - bMean
+            rVar += dr * dr
+            gVar += dg * dg
+            bVar += db * db
+        }
+        rVar /= count; gVar /= count; bVar /= count
+        val rStd = kotlin.math.sqrt(rVar)
+        val gStd = kotlin.math.sqrt(gVar)
+        val bStd = kotlin.math.sqrt(bVar)
+        // 全单色：任一通道过低（三通道同时低才计"全单色"，避免误杀低对比度合法画面）
+        if (rStd < 3 && gStd < 3 && bStd < 3) return false
+        // 条带/马赛克：任一通道过高
+        if (rStd > 95 || gStd > 95 || bStd > 95) return false
+        return true
     }
 
     private const val FFMPEG_THUMB_DIR = "ffmpeg-thumb"
