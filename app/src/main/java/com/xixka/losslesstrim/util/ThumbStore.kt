@@ -392,67 +392,50 @@ object ThumbStore {
         val outFile = File(outDir, "ff_${System.currentTimeMillis()}_${Thread.currentThread().id}.jpg")
         val ss = (timeMs / 1000.0).coerceAtLeast(0.0)
         val scale = "scale='min($maxPx,iw)':-1"
-        // input-seek 模式：-ss 在 -i 前用 container index 快速定位（前提容器有
-        // 索引——MP4/MKV 都有；纯 MPEG-1/2/TS 等不索引容器下会回退为顺序读，
-        // 仍 OK，仅稍慢）
-        //
+        val ssStr = String.format(Locale.US, "%.3f", ss)
+        // 第 1 次：input-seek + -frames:v 1（快，用 container index 跳到 ≥ ss 的关键帧）
         // **关键参数 -skip_frame nokey + -threads 1 + -err_detect ignore_err**：
-        // HEVC + B 帧 + 不标准 MP4 上 ffmpeg 即使软解也可能在 input-seek 落点
-        // 错位时遇到 P/B 帧需要参考（前一个 IDR 已被 seek 跳过）→ 解参考失败
-        // 输出错帧（粉红条带 / 绿红紫混合花屏）。
-        //
-        // -skip_frame nokey：codec-level 选项，让 ffmpeg 跳过非关键帧包只解
-        //   I 帧——I 帧独立可解不需参考，必然稳定
-        // -threads 1：单线程解 HEVC，避免 ffmpeg 多线程在短任务里调度错位
+        // HEVC + B 帧上 ffmpeg 即使软解也可能在 input-seek 落点错位时遇到 P/B 帧需要
+        // 参考（前一个 IDR 已被 seek 跳过）→ 解参考失败输出错帧（粉红条带 / 绿红紫混合）。
+        // -skip_frame nokey：codec-level 跳过非关键帧包只解 I 帧（I 帧独立可解不需参考）
+        // -threads 1：单线程解 HEVC，避免多线程在短任务里调度错位
         // -err_detect ignore_err：跳过坏包不抛错
-        val cmd = "-hide_banner -loglevel error -err_detect ignore_err -skip_frame nokey -threads 1 " +
-                "-ss ${String.format(Locale.US, "%.3f", ss)} " +
-                "-i \"$path\" -an -sn -frames:v 1 -vf \"$scale\" -q:v 3 -y \"${outFile.absolutePath}\""
+        // -loglevel info：原本 -loglevel error 时 stderr 几乎全空（用户诊断日志证实），
+        // 改 info 让 ffmpeg 启动/退出信息进 stderr 便于诊断"rc=0 但 outfile 不存在"
+        val common = "-hide_banner -loglevel info -err_detect ignore_err -skip_frame nokey -threads 1"
+        val inputSeekCmd = "$common -ss $ssStr -i \"$path\" -an -sn -frames:v 1 -vf \"$scale\" -q:v 3 -y \"${outFile.absolutePath}\""
+        // 第 2 次 fallback（input-seek 失败时）：input-seek 到 (ss-30s) 然后输出侧精确
+        // seek 到 ss。30s 间隔让 ffmpeg 顺序解码约 6 个 GOP（HEVC 4K 约 1-2s），稳过
+        // 直接 output-seek 整段（44 分钟视频要解 1-2 分钟）。input-seek 跳到 ss-30 的
+        // 关键帧，output-seek 30s 到精确位置——EOF 边界不再有问题（因为 30s 前的位置
+        // 远离 EOF，input-seek 必有可命中关键帧）
+        val preSec = (ss - 30.0).coerceAtLeast(0.0)
+        val outDelta = ss - preSec
+        val outSeekCmd = "$common -ss ${String.format(Locale.US, "%.3f", preSec)} -i \"$path\" " +
+                "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$scale\" -q:v 3 -y \"${outFile.absolutePath}\""
+
         return try {
-            val session = FFmpegKit.execute(cmd)
-            val rc = session.returnCode
-            // 收集日志用于诊断（allLogsAsString 在 session history=2 下可能丢，
-            // 但 execute 同步返回时 session 仍在 history 内，logs 完整）
-            val logs = try { session.allLogsAsString } catch (_: Exception) { null } ?: ""
-            try {
-                if (rc != null && rc.isValueSuccess && outFile.exists() && outFile.length() > 0) {
-                    val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
-                    val bmp = BitmapFactory.decodeFile(outFile.absolutePath, opts)
-                    if (bmp != null && isBitmapHealthy(bmp)) bmp else {
-                        // ffmpeg "成功"但 Bitmap 不健康——这种情况典型是 -skip_frame nokey
-                        // 仍抽到坏帧（极少见，记录诊断让用户能上报）
-                        recordFailure(FailureRecord(
-                            at = System.currentTimeMillis(),
-                            path = path,
-                            fileSize = File(path).length(),
-                            timeMs = timeMs,
-                            cmd = cmd,
-                            returnCode = rc?.value,
-                            stderr = "rc=success but isBitmapHealthy rejected (stddev<3 or stddev>95). " +
-                                    "outfile=${outFile.length()}B. Logs:\n$logs",
-                            via = "ffmpeg",
-                        ))
-                        bmp?.recycle()
-                        null
-                    }
-                } else {
-                    // rc 非 success 或输出文件为空：典型 ffmpeg 解码失败/路径错
-                    recordFailure(FailureRecord(
-                        at = System.currentTimeMillis(),
-                        path = path,
-                        fileSize = File(path).length(),
-                        timeMs = timeMs,
-                        cmd = cmd,
-                        returnCode = rc?.value,
-                        stderr = "rc=${rc?.value} outfile_exists=${outFile.exists()} " +
-                                "outfile_size=${outFile.length()}. Logs:\n$logs",
-                        via = "ffmpeg",
-                    ))
-                    null
-                }
-            } finally {
-                try { outFile.delete() } catch (_: Exception) {}
-            }
+            runFfmpegOnce(inputSeekCmd, path, timeMs, outFile)
+                ?: runFfmpegOnce(outSeekCmd, path, timeMs, outFile)
+        } catch (e: Exception) {
+            recordFailure(FailureRecord(
+                at = System.currentTimeMillis(),
+                path = path,
+                fileSize = File(path).length(),
+                timeMs = timeMs,
+                cmd = inputSeekCmd,
+                returnCode = null,
+                stderr = "Exception (outer): ${e.javaClass.simpleName}: ${e.message}",
+                via = "ffmpeg",
+            ))
+            null
+        }
+    }
+
+    /** 单次 ffmpeg 抽帧执行；失败/不健康都返回 null 让 caller 决定是否 fallback */
+    private fun runFfmpegOnce(cmd: String, path: String, timeMs: Long, outFile: File): Bitmap? {
+        val session = try {
+            FFmpegKit.execute(cmd)
         } catch (e: Exception) {
             recordFailure(FailureRecord(
                 at = System.currentTimeMillis(),
@@ -464,7 +447,49 @@ object ThumbStore {
                 stderr = "Exception: ${e.javaClass.simpleName}: ${e.message}",
                 via = "ffmpeg",
             ))
-            null
+            return null
+        }
+        val rc = session.returnCode
+        // 收集日志用于诊断（allLogsAsString 在 session history=2 下可能丢，
+        // 但 execute 同步返回时 session 仍在 history 内，logs 完整）
+        val logs = try { session.allLogsAsString } catch (_: Exception) { null } ?: ""
+        try {
+            if (rc != null && rc.isValueSuccess && outFile.exists() && outFile.length() > 0) {
+                val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
+                val bmp = BitmapFactory.decodeFile(outFile.absolutePath, opts)
+                if (bmp != null && isBitmapHealthy(bmp)) bmp else {
+                    // ffmpeg "成功"但 Bitmap 不健康——典型 -skip_frame nokey 仍抽到坏帧
+                    recordFailure(FailureRecord(
+                        at = System.currentTimeMillis(),
+                        path = path,
+                        fileSize = File(path).length(),
+                        timeMs = timeMs,
+                        cmd = cmd,
+                        returnCode = rc?.value,
+                        stderr = "rc=success but isBitmapHealthy rejected (stddev<3 or stddev>95). " +
+                                "outfile=${outFile.length()}B. Logs:\n$logs",
+                        via = "ffmpeg",
+                    ))
+                    bmp?.recycle()
+                    null
+                }
+            } else {
+                // rc 非 success 或输出文件为空：典型 input-seek 在 EOF 附近跳过范围 / 解码失败
+                recordFailure(FailureRecord(
+                    at = System.currentTimeMillis(),
+                    path = path,
+                    fileSize = File(path).length(),
+                    timeMs = timeMs,
+                    cmd = cmd,
+                    returnCode = rc?.value,
+                    stderr = "rc=${rc?.value} outfile_exists=${outFile.exists()} " +
+                            "outfile_size=${outFile.length()}. Logs:\n$logs",
+                    via = "ffmpeg",
+                ))
+                null
+            }
+        } finally {
+            try { outFile.delete() } catch (_: Exception) {}
         }
     }
 
