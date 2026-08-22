@@ -245,9 +245,19 @@ object ThumbStore {
         val scale = "scale='min($maxPx,iw)':-1"
         // input-seek 模式：-ss 在 -i 前用 container index 快速定位（前提容器有
         // 索引——MP4/MKV 都有；纯 MPEG-1/2/TS 等不索引容器下会回退为顺序读，
-        // 仍 OK，仅稍慢）；-an/-sn 跳过音频/字幕流的 demux 解码（不分配解复用
-        // 缓冲），避免少数容器在 input-seek 时把无关流也读一遍
-        val cmd = "-hide_banner -loglevel error -ss ${String.format(Locale.US, "%.3f", ss)} " +
+        // 仍 OK，仅稍慢）
+        //
+        // **关键参数 -skip_frame nokey + -threads 1 + -err_detect ignore_err**：
+        // HEVC + B 帧 + 不标准 MP4 上 ffmpeg 即使软解也可能在 input-seek 落点
+        // 错位时遇到 P/B 帧需要参考（前一个 IDR 已被 seek 跳过）→ 解参考失败
+        // 输出错帧（粉红条带 / 绿红紫混合花屏）。
+        //
+        // -skip_frame nokey：codec-level 选项，让 ffmpeg 跳过非关键帧包只解
+        //   I 帧——I 帧独立可解不需参考，必然稳定
+        // -threads 1：单线程解 HEVC，避免 ffmpeg 多线程在短任务里调度错位
+        // -err_detect ignore_err：跳过坏包不抛错
+        val cmd = "-hide_banner -loglevel error -err_detect ignore_err -skip_frame nokey -threads 1 " +
+                "-ss ${String.format(Locale.US, "%.3f", ss)} " +
                 "-i \"$path\" -an -sn -frames:v 1 -vf \"$scale\" -q:v 3 -y \"${outFile.absolutePath}\""
         return try {
             val session = FFmpegKit.execute(cmd)
