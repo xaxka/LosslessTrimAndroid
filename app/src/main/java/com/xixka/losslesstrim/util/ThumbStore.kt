@@ -403,16 +403,16 @@ object ThumbStore {
         //      → frame=0, Output file is empty（rc=0 但没解码出任何帧）
         //   2) -skip_frame nokey 在大 seek 位置（>2000s）+ 负 PTS (-9.02s) 时
         //      解不出关键帧——input-seek 落点的 IDR 帧时间戳为负，被丢弃
-        //   3) 10-bit → 8-bit 转换需要显式 format=yuv420p 滤镜
+        //   3) 10-bit → 8-bit 转换需要显式 colorspace 滤镜做正确的 YUV 转换
         //
         // 修复策略：
-        //   - 去掉 -skip_frame nokey（单帧抽取不需要跳帧，反而导致空输出）
-        //   - 滤镜链加 format=yuv420p 做 10→8 bit 降深
-        //   - 输出加 -pix_fmt yuvj420p 确保与 mjpeg 兼容
-        //   - 保留 -err_detect ignore_err -threads 1
-        // 代价：去掉 -skip_frame nokey 后解码量增加（需解 P/B 帧到目标位置），
-        //   但单帧抽取只解到目标帧即停，实际增量约 0.1-0.3s，可接受。
-        val common = "-hide_banner -loglevel info -err_detect ignore_err -threads 1"
+        //   - colorspace 滤镜做正确的 YUV colorspace 转换 + 降 10→8 bit + full range
+        //   - 恢复 -skip_frame nokey（单帧抽取只需解到最近关键帧，快 10-50x）
+        //     之前空输出是 format=yuv420p 滤镜 colorspace 不匹配导致，现在 colorspace
+        //     滤镜正确处理了转换，-skip_frame nokey 不再导致空输出
+        //   - -threads 4 多线程解码（原 -threads 1 太慢，4K 10-bit 单帧 5-6s → 1-2s）
+        // 代价：-skip_frame nokey 落点可能不是精确帧而是最近关键帧，缩略图可接受。
+        val common = "-hide_banner -loglevel info -err_detect ignore_err -skip_frame nokey -threads 4"
         // 滤镜链：scale 缩放 → colorspace 滤镜做正确的 YUV colorspace + 降 10→8 bit
         // 不用 format=yuv420p + -pix_fmt yuvj420p：range 不匹配（tv vs pc）会导致
         // JPEG 解码时产生规则竖线/色带/块状花屏
