@@ -72,6 +72,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private var scanJob: Job? = null
 
+    // ---------------- 缓存管理（设置页"清除缓存"用） ----------------
+
+    /** 缓存概览：磁盘字节数 + 缩略图文件数 + Room 缓存行数 + 上次清除时间 */
+    data class CacheInfo(
+        val diskBytes: Long = 0L,
+        val thumbFiles: Int = 0,
+        val roomRows: Int = 0,
+        val lastClearedAt: Long? = null,
+    )
+
+    private val _cacheInfo = MutableStateFlow(CacheInfo())
+    val cacheInfo = _cacheInfo.asStateFlow()
+
+    private val _clearingCache = MutableStateFlow(false)
+    val clearingCache = _clearingCache.asStateFlow()
+
     init {
         // 恢复持久化的每文件覆盖设置（片头/片尾/区间/丢弃轨道）：只读一次，
         // 后续以内存态为准并主动落盘，避免落盘回显与本地修改互相覆盖
@@ -352,4 +368,72 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun lastResults(): List<FileResult> = TrimController.lastResults.value
+
+    // ---------------- 缓存管理 ----------------
+
+    /**
+     * 刷新缓存概览（设置页进入时调用）：扫 thumbs/ + ffmpeg-thumb/ 计字节数，
+     * 查 ProbeStore Room 行数。先返回上次 lastClearedAt（如有）防止 UI 闪空。
+     */
+    fun refreshCacheInfo() {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val lastCleared = _cacheInfo.value.lastClearedAt
+            // 磁盘缓存：thumbs/ + ffmpeg-thumb/ 两目录下全部文件 size 累加
+            var bytes = 0L
+            var files = 0
+            listOf("thumbs", "ffmpeg-thumb").forEach { name ->
+                val dir = java.io.File(app.cacheDir, name)
+                if (dir.isDirectory) {
+                    dir.listFiles()?.forEach { f ->
+                        if (f.isFile) {
+                            bytes += f.length()
+                            files++
+                        }
+                    }
+                }
+            }
+            // Room 三表行数和（可能返回 0：表为空或读失败，UI 仍可显示）
+            val rows = com.xixka.losslesstrim.data.ProbeStore.totalRows(app)
+            _cacheInfo.value = CacheInfo(
+                diskBytes = bytes,
+                thumbFiles = files,
+                roomRows = rows,
+                lastClearedAt = lastCleared,
+            )
+        }
+    }
+
+    /**
+     * 清除缓存（设置页按钮）：组合清 ThumbStore 内存+磁盘+失败哨兵、
+     * ProbeStore L2 Room 三表、Probe 进程内 L1 keyframe cache、Scanner
+     * 进程内 L1 probe cache——修复前的花屏 JPEG 会被删掉，下次进入页面
+     * 重新抽帧/探测。重入保护：clearing 期间忽略重复点击。
+     */
+    fun clearCache() {
+        if (_clearingCache.value) return
+        viewModelScope.launch {
+            _clearingCache.value = true
+            try {
+                val app = getApplication<Application>()
+                // 1. ThumbStore: 内存 LruCache + 磁盘 thumbs/ffmpeg-thumb + failed 哨兵
+                com.xixka.losslesstrim.util.ThumbStore.clearAll(app)
+                // 2. ProbeStore: L2 Room（probe/keyframe/near 三表）
+                com.xixka.losslesstrim.data.ProbeStore.clearAll(app)
+                // 3. Probe.clearKeyframeCache: 进程内 L1 keyframe cache（全量+邻域）
+                com.xixka.losslesstrim.ffmpeg.Probe.clearKeyframeCache()
+                // 4. Scanner.clearProbeCache: 进程内 L1 probe cache
+                Scanner.clearProbeCache()
+                val now = System.currentTimeMillis()
+                _cacheInfo.value = CacheInfo(
+                    diskBytes = 0L,
+                    thumbFiles = 0,
+                    roomRows = 0,
+                    lastClearedAt = now,
+                )
+            } finally {
+                _clearingCache.value = false
+            }
+        }
+    }
 }

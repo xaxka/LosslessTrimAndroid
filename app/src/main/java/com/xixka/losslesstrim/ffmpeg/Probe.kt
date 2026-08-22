@@ -515,6 +515,16 @@ object Probe {
     }
 
     /**
+     * 清空进程内 L1 关键帧缓存（全量 + 邻域条目）。配合 [com.xixka.losslesstrim.data.ProbeStore.clearAll]
+     * （清 L2 Room）+ [com.xixka.losslesstrim.util.ThumbStore.clearAll]（清缩略图）一起被设置页
+     * "清除缓存"调用。Scanner 的 probeCache（L1 Probe 内存）也跟着清——同进程下复用
+     * 的内存态探测结果会因文件身份变化/版本升级失效，下次扫描重新探测。
+     */
+    fun clearKeyframeCache() {
+        keyframeCache.clear()
+    }
+
+    /**
      * 切点邻域关键帧探测：用 -read_intervals 只读各切点前后 [KEYFRAME_WINDOW_SEC]
      * 的 packet，代替整文件全量扫描（[probeKeyframes]）。GB 级 4K 长片全量扫描
      * 要顺序读完整文件（每片数十秒），批量队列"每处理完一个文件干等半天"的

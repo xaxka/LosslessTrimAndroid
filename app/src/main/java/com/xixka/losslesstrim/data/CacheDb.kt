@@ -110,6 +110,26 @@ interface CacheDao {
 
     @Query("DELETE FROM near_keyframe_cache WHERE updatedAt < :threshold")
     suspend fun pruneNearKeyframes(threshold: Long): Int
+
+    /** 用户主动清除缓存：清空全部探测结果、关键帧与邻域关键帧表 */
+    @Query("DELETE FROM probe_cache")
+    suspend fun clearProbe(): Int
+
+    @Query("DELETE FROM keyframe_cache")
+    suspend fun clearKeyframes(): Int
+
+    @Query("DELETE FROM near_keyframe_cache")
+    suspend fun clearNearKeyframes(): Int
+
+    /** 行数估算：用于设置页"缓存 N 行"展示（COUNT(*) 兜底失败返回 0） */
+    @Query("SELECT COUNT(*) FROM probe_cache")
+    suspend fun probeCount(): Int
+
+    @Query("SELECT COUNT(*) FROM keyframe_cache")
+    suspend fun keyframeCount(): Int
+
+    @Query("SELECT COUNT(*) FROM near_keyframe_cache")
+    suspend fun nearKeyframeCount(): Int
 }
 
 @Database(
@@ -282,6 +302,34 @@ object ProbeStore {
             CacheDb.get(context).dao().pruneKeyframes(threshold)
             CacheDb.get(context).dao().pruneNearKeyframes(threshold)
         }
+    }
+
+    /**
+     * 用户主动清空持久缓存（设置页"清除缓存"）：清空三张表全部行，
+     * 下次扫描重新探测入库（条目身份 = uri + 大小 + 修改时间，与文件
+     * 状态无关，全部失效）。pruned 复位 false 让下一轮 pruneOnce 重启。
+     */
+    suspend fun clearAll(context: Context) {
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val dao = CacheDb.get(context).dao()
+                dao.clearProbe()
+                dao.clearKeyframes()
+                dao.clearNearKeyframes()
+            }
+            pruned.set(false)
+        }
+    }
+
+    /**
+     * 行数统计（设置页展示用）：三表 COUNT(*) 求和。Room 失败返回 0，
+     * UI 仍显示"0 行"——不影响"清除缓存"按钮可用。
+     */
+    suspend fun totalRows(context: Context): Int = withContext(Dispatchers.IO) {
+        runCatching {
+            val dao = CacheDb.get(context).dao()
+            dao.probeCount() + dao.keyframeCount() + dao.nearKeyframeCount()
+        }.getOrDefault(0)
     }
 
     // ---- StreamInfo ↔ JSON（org.json，零新增依赖） ----

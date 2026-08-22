@@ -78,6 +78,40 @@ object ThumbStore {
     fun peek(key: String): Bitmap? = memCache.get(key)
 
     /**
+     * 清空全部缓存：内存 LruCache + 磁盘 thumbs/ + cacheDir/ffmpeg-thumb/ +
+     * failed 哨兵。修复前的花屏 JPEG 会被删掉，下次进入页面重新抽帧。
+     *
+     * 返回删除的磁盘字节数 + 文件数（不含内存条目数——内存条目会被 LruCache
+     * evict 自动 GC，数量无意义）。Room 探测缓存不走这里，由 ProbeStore.clearAll
+     * 单独清；Scanner 的 probeCache（内存 L1）会在进程下次重建时自然空。
+     */
+    fun clearAll(context: Context): ClearResult {
+        memCache.evictAll()
+        failed.evictAll()
+        diskDirCache = null     // 强制下次 diskDir() 重新解析（旧的已删）
+        var bytes = 0L
+        var files = 0
+        // thumbs/ 与 ffmpeg-thumb/ 同在 cacheDir 下；逐目录遍历删除
+        listOf(DISK_DIR_NAME, FFMPEG_THUMB_DIR).forEach { name ->
+            val dir = File(context.cacheDir, name)
+            if (dir.isDirectory) {
+                dir.listFiles()?.forEach { f ->
+                    if (f.isFile) {
+                        bytes += f.length()
+                        files++
+                        try { f.delete() } catch (_: Exception) {}
+                    }
+                }
+                try { dir.delete() } catch (_: Exception) {}
+            }
+        }
+        return ClearResult(bytes, files)
+    }
+
+    /** 清空结果：释放的磁盘字节数 + 删除的文件数 */
+    data class ClearResult(val bytes: Long, val files: Int)
+
+    /**
      * 异步加载：内存 → 磁盘 → 抽帧。
      * 磁盘命中不需要排队（只是解一张小 JPEG），直接放行；
      * 真正 expensive 的视频抽帧才进并发池，列表/预览各用各的池。
