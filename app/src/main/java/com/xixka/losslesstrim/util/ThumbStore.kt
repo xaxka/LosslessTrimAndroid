@@ -406,8 +406,11 @@ object ThumbStore {
         // 回退链：hw-input-seek → hw-out-seek → sw-input-seek → sw-out-seek
 
         // --- 硬件解码命令 ---
+        // 硬解输出 NV12 8-bit (limited range tv)，mjpeg 需要 yuvj420p (full range pc)
+        // 必须用 colorspace 滤镜做 range 转换，否则 range 不匹配会产生色带/竖线花屏
+        // 不需要 format=yuv420p（硬解输出已是 8-bit），不需要 iall=auto（硬解已处理 colorspace）
         val hwCommon = "-hide_banner -loglevel info -err_detect ignore_err -hwaccel mediacodec -threads 4"
-        val hwVf = "scale='min($maxPx,iw)':-1"
+        val hwVf = "scale='min($maxPx,iw)':-1,colorspace=all=bt709:range=pc"
         val hwInputCmd = "$hwCommon -ss $ssStr -i \"$path\" -an -sn -frames:v 1 -vf \"$hwVf\" -pix_fmt yuvj420p -q:v 3 -y \"${outFile.absolutePath}\""
         val preSec = (ss - 30.0).coerceAtLeast(0.0)
         val outDelta = ss - preSec
