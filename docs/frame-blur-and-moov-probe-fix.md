@@ -94,8 +94,29 @@ stream 列表——只是 ffprobe 因严格模式而拒绝。
 - `Probe.kt::platformTrack` 新增 `rotation: Int = 0` 参数（兜底时填
   MediaMetadataRetriever 的 `VIDEO_ROTATION`，原本只对 ffprobe 路径生效）
 - `TrimService.kt::processJob` 新增 1b 段：streams=空 + probeOk=true → FAILED
-- `ThumbStore.kt` 引入 ffmpeg 抽帧依赖（已通过 `com.antonkarpenko:ffmpeg-kit-min:2.2.2`
-  现成 ffmpeg 二进制，不增加新依赖）
+- `ThumbStore.kt` ffmpeg 抽帧管线迭代（详见 §5）：从 platform-first → platform + ffmpeg fallback
+  → preview 路径必走 ffmpeg 绕开 diskCache → 切到 ffmpeg-kit-full 包 + `-skip_frame nokey`
+
+## 4. 后续修复（用户仍报花屏后的迭代）
+
+第一版（commit b0bf022）改 platform `OPTION_CLOSEST` + 5 点单色检测 + ffmpeg fallback 仍花屏：
+- 用户截图：粉红条带 + 绿红紫混合（典型 HEVC B 帧解参考失败）
+- 5 点单色检测识别不出条带/马赛克（只识别整片同色）→ 坏图通过检测进 diskCache
+
+第二版（commit a075939）preview 路径绕开 diskCache + 健康检测升级到 64 点 stddev：
+- preview 路径必走 ffmpeg 软解（绕开 platform MediaCodec）
+- 8x8 网格采样 64 像素，stddev < 3（单色）或 > 95（条带）判花屏
+- platform 抽的图只入 memCache 不入 diskCache
+
+第三版（commit 0982800）ffmpeg 命令加 `-skip_frame nokey -threads 1 -err_detect ignore_err`：
+- `-skip_frame nokey`：codec-level 跳过非关键帧 packet 只解 I 帧（I 帧独立可解）
+- 仍花屏说明 ffmpeg-kit-min **没有 HEVC 软解码器**——抽帧时回退到不正确的解码器
+  或硬解导致花屏
+
+第四版（本次）：切到 `com.antonkarpenko:ffmpeg-kit-full:2.2.1`：
+- full 包含完整软解码器（x264/x265/dav1d/ffmpeg 自带 hevc decoder 等）
+- `-skip_frame nokey` + full HEVC 软解 = 必然稳定
+- APK 体积约 +60MB（full vs min 的 native lib 差），个人自用工具可接受
 
 ## 4. 测试覆盖
 
