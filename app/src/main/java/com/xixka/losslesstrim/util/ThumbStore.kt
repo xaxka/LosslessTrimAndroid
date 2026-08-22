@@ -391,19 +391,26 @@ object ThumbStore {
         if (!outDir.exists()) outDir.mkdirs()
         val outFile = File(outDir, "ff_${System.currentTimeMillis()}_${Thread.currentThread().id}.jpg")
         val ss = (timeMs / 1000.0).coerceAtLeast(0.0)
-        val scale = "scale='min($maxPx,iw)':-1"
         val ssStr = String.format(Locale.US, "%.3f", ss)
-        // 第 1 次：input-seek + -frames:v 1（快，用 container index 跳到 ≥ ss 的关键帧）
-        // **关键参数 -skip_frame nokey + -threads 1 + -err_detect ignore_err**：
-        // HEVC + B 帧上 ffmpeg 即使软解也可能在 input-seek 落点错位时遇到 P/B 帧需要
-        // 参考（前一个 IDR 已被 seek 跳过）→ 解参考失败输出错帧（粉红条带 / 绿红紫混合）。
-        // -skip_frame nokey：codec-level 跳过非关键帧包只解 I 帧（I 帧独立可解不需参考）
-        // -threads 1：单线程解 HEVC，避免多线程在短任务里调度错位
-        // -err_detect ignore_err：跳过坏包不抛错
-        // -loglevel info：原本 -loglevel error 时 stderr 几乎全空（用户诊断日志证实），
-        // 改 info 让 ffmpeg 启动/退出信息进 stderr 便于诊断"rc=0 但 outfile 不存在"
-        val common = "-hide_banner -loglevel info -err_detect ignore_err -skip_frame nokey -threads 1"
-        val inputSeekCmd = "$common -ss $ssStr -i \"$path\" -an -sn -frames:v 1 -vf \"$scale\" -q:v 3 -y \"${outFile.absolutePath}\""
+        // === 花屏/空输出修复（2026-08-22）===
+        // 根因：HEVC 10-bit (yuv420p10le) 源 + mjpeg 输出不兼容
+        //   1) mjpeg 编码器只支持 8-bit yuvj420p，10-bit 帧进 filter chain 时
+        //      报 "Changing video frame properties on the fly is not supported"
+        //      → frame=0, Output file is empty（rc=0 但没解码出任何帧）
+        //   2) -skip_frame nokey 在大 seek 位置（>2000s）+ 负 PTS (-9.02s) 时
+        //      解不出关键帧——input-seek 落点的 IDR 帧时间戳为负，被丢弃
+        //   3) 10-bit → 8-bit 转换需要显式 format=yuv420p 滤镜
+        //
+        // 修复策略：
+        //   - 去掉 -skip_frame nokey（单帧抽取不需要跳帧，反而导致空输出）
+        //   - 滤镜链加 format=yuv420p 做 10→8 bit 降深
+        //   - 输出加 -pix_fmt yuvj420p 确保与 mjpeg 兼容
+        //   - 保留 -err_detect ignore_err -threads 1
+        // 代价：去掉 -skip_frame nokey 后解码量增加（需解 P/B 帧到目标位置），
+        //   但单帧抽取只解到目标帧即停，实际增量约 0.1-0.3s，可接受。
+        val common = "-hide_banner -loglevel info -err_detect ignore_err -threads 1"
+        val vf = "scale='min($maxPx,iw)':-1,format=yuv420p"
+        val inputSeekCmd = "$common -ss $ssStr -i \"$path\" -an -sn -frames:v 1 -vf \"$vf\" -q:v 3 -pix_fmt yuvj420p -y \"${outFile.absolutePath}\""
         // 第 2 次 fallback（input-seek 失败时）：input-seek 到 (ss-30s) 然后输出侧精确
         // seek 到 ss。30s 间隔让 ffmpeg 顺序解码约 6 个 GOP（HEVC 4K 约 1-2s），稳过
         // 直接 output-seek 整段（44 分钟视频要解 1-2 分钟）。input-seek 跳到 ss-30 的
@@ -412,7 +419,7 @@ object ThumbStore {
         val preSec = (ss - 30.0).coerceAtLeast(0.0)
         val outDelta = ss - preSec
         val outSeekCmd = "$common -ss ${String.format(Locale.US, "%.3f", preSec)} -i \"$path\" " +
-                "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$scale\" -q:v 3 -y \"${outFile.absolutePath}\""
+                "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$vf\" -q:v 3 -pix_fmt yuvj420p -y \"${outFile.absolutePath}\""
 
         return try {
             runFfmpegOnce(inputSeekCmd, path, timeMs, outFile)
