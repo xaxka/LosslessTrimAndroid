@@ -20,6 +20,7 @@ import com.xixka.losslesstrim.trim.TrimJob
 import com.xixka.losslesstrim.trim.TrimPlanner
 import com.xixka.losslesstrim.data.TrimPlan
 import com.xixka.losslesstrim.util.Formats
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -32,6 +33,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** 列表条目 + 当前参数下的处理计划 */
 data class EntryStatus(
@@ -455,7 +457,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             _exportingDiag.value = true
             try {
                 val app = getApplication<Application>()
-                val file = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val file = withContext(Dispatchers.IO) {
                     com.xixka.losslesstrim.util.ThumbStore.exportDiagnostics(app)
                 }
                 _diagPath.value = file?.absolutePath
