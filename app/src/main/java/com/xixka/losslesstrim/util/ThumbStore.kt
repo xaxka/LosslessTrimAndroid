@@ -316,20 +316,30 @@ object ThumbStore {
         var unhealthy = false
         return try {
             mmr.setDataSource(context, uri)
-            val timeUs = timeMs * 1000L
-            val bmp = if (Build.VERSION.SDK_INT >= 27) {
-                mmr.getScaledFrameAtTime(
-                    timeUs, MediaMetadataRetriever.OPTION_CLOSEST, maxPx, maxPx
-                )
-            } else {
-                val orig = mmr.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
-                scaleAndRecycle(orig, maxPx)
-            }
-            if (bmp != null && isBitmapHealthy(bmp)) bmp else {
-                // 不健康：典型表现是绿屏/粉红条带/绿红紫混合花屏
-                unhealthy = bmp != null
-                bmp?.recycle()
+            // HEVC 视频跳过 platform：MediaMetadataRetriever 在 HEVC（尤其 10-bit）
+            // 上系统性花屏，isBitmapHealthy 检测不出色调偏移类花屏。
+            // 直接返回 null 走 ffmpeg 兜底（软解颜色正确）。
+            val mime = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE)
+            if (mime != null && mime.contains("hevc", ignoreCase = true)) {
+                // HEVC 跳过 platform：MMR 在 HEVC（尤其 10-bit）上系统性花屏，
+                // isBitmapHealthy 检测不出色调偏移类花屏。返回 null 走 ffmpeg。
                 null
+            } else {
+                val timeUs = timeMs * 1000L
+                val bmp = if (Build.VERSION.SDK_INT >= 27) {
+                    mmr.getScaledFrameAtTime(
+                        timeUs, MediaMetadataRetriever.OPTION_CLOSEST, maxPx, maxPx
+                    )
+                } else {
+                    val orig = mmr.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
+                    scaleAndRecycle(orig, maxPx)
+                }
+                if (bmp != null && isBitmapHealthy(bmp)) bmp else {
+                    // 不健康：典型表现是绿屏/粉红条带/绿红紫混合花屏
+                    unhealthy = bmp != null
+                    bmp?.recycle()
+                    null
+                }
             }
         } catch (e: Exception) {
             recordFailure(FailureRecord(
