@@ -396,50 +396,45 @@ object ThumbStore {
         val outFile = File(outDir, "ff_${System.currentTimeMillis()}_${Thread.currentThread().id}.jpg")
         val ss = (timeMs / 1000.0).coerceAtLeast(0.0)
         val ssStr = String.format(Locale.US, "%.3f", ss)
-        // === 花屏/空输出修复（2026-08-22）===
-        // 根因：HEVC 10-bit (yuv420p10le) 源 + mjpeg 输出不兼容
-        //   1) mjpeg 编码器只支持 8-bit yuvj420p，10-bit 帧进 filter chain 时
-        //      报 "Changing video frame properties on the fly is not supported"
-        //      → frame=0, Output file is empty（rc=0 但没解码出任何帧）
-        //   2) -skip_frame nokey 在大 seek 位置（>2000s）+ 负 PTS (-9.02s) 时
-        //      解不出关键帧——input-seek 落点的 IDR 帧时间戳为负，被丢弃
-        //   3) 10-bit → 8-bit 转换需要显式 colorspace 滤镜做正确的 YUV 转换
-        //
-        // 修复策略：
-        //   - colorspace 滤镜做正确的 YUV colorspace 转换 + 降 10→8 bit + full range
-        //   - 恢复 -skip_frame nokey（单帧抽取只需解到最近关键帧，快 10-50x）
-        //     之前空输出是 format=yuv420p 滤镜 colorspace 不匹配导致，现在 colorspace
-        //     滤镜正确处理了转换，-skip_frame nokey 不再导致空输出
-        //   - -threads 4 多线程解码（原 -threads 1 太慢，4K 10-bit 单帧 5-6s → 1-2s）
-        // 代价：-skip_frame nokey 落点可能不是精确帧而是最近关键帧，缩略图可接受。
-        val common = "-hide_banner -loglevel info -err_detect ignore_err -skip_frame nokey -threads 4"
-        // 滤镜链：scale 缩放 → colorspace 滤镜做正确的 YUV colorspace + 降 10→8 bit
-        // 不用 format=yuv420p + -pix_fmt yuvj420p：range 不匹配（tv vs pc）会导致
-        // JPEG 解码时产生规则竖线/色带/块状花屏
-        // colorspace 滤镜：iall=auto 自动检测输入色彩空间，all=bt709 输出标准 bt709，
-        // range=pc 输出 full range 与 mjpeg 编码器匹配，format=yuv420p 降 8 bit
-        val vf = "scale='min($maxPx,iw)':-1,colorspace=iall=auto:all=bt709:range=pc:format=yuv420p"
-        val inputSeekCmd = "$common -ss $ssStr -i \"$path\" -an -sn -frames:v 1 -vf \"$vf\" -q:v 3 -y \"${outFile.absolutePath}\""
-        // 第 2 次 fallback（input-seek 失败时）：input-seek 到 (ss-30s) 然后输出侧精确
-        // seek 到 ss。30s 间隔让 ffmpeg 顺序解码约 6 个 GOP（HEVC 4K 约 1-2s），稳过
-        // 直接 output-seek 整段（44 分钟视频要解 1-2 分钟）。input-seek 跳到 ss-30 的
-        // 关键帧，output-seek 30s 到精确位置——EOF 边界不再有问题（因为 30s 前的位置
-        // 远离 EOF，input-seek 必有可命中关键帧）
+        // === 缩略图抽帧策略（2026-08-22）===
+        // 优先硬件解码（mediacodec），失败回退软件解码。
+        // 硬解：GPU 解 HEVC 快 5-10x，输出 NV12 8-bit，只需 scale 滤镜，不需要
+        //       colorspace/降位深。-skip_frame nokey 对 MediaCodec 无效（硬解不走
+        //       codec-level 跳帧），但硬解本身够快不需要跳帧。
+        // 软解：colorspace 滤镜做 10→8bit + YUV colorspace 转换 + full range，
+        //       -skip_frame nokey 只解关键帧加速，-threads 4 多线程。
+        // 回退链：hw-input-seek → hw-out-seek → sw-input-seek → sw-out-seek
+
+        // --- 硬件解码命令 ---
+        val hwCommon = "-hide_banner -loglevel info -err_detect ignore_err -hwaccel mediacodec -threads 4"
+        val hwVf = "scale='min($maxPx,iw)':-1"
+        val hwInputCmd = "$hwCommon -ss $ssStr -i \"$path\" -an -sn -frames:v 1 -vf \"$hwVf\" -pix_fmt yuvj420p -q:v 3 -y \"${outFile.absolutePath}\""
         val preSec = (ss - 30.0).coerceAtLeast(0.0)
         val outDelta = ss - preSec
-        val outSeekCmd = "$common -ss ${String.format(Locale.US, "%.3f", preSec)} -i \"$path\" " +
-                "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$vf\" -q:v 3 -y \"${outFile.absolutePath}\""
+        val hwOutCmd = "$hwCommon -ss ${String.format(Locale.US, "%.3f", preSec)} -i \"$path\" " +
+                "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$hwVf\" -pix_fmt yuvj420p -q:v 3 -y \"${outFile.absolutePath}\""
+
+        // --- 软件解码命令（硬解失败回退）---
+        val swCommon = "-hide_banner -loglevel info -err_detect ignore_err -skip_frame nokey -threads 4"
+        // colorspace 滤镜：iall=auto 自动检测输入色彩空间，all=bt709 输出标准 bt709，
+        // range=pc 输出 full range 与 mjpeg 编码器匹配，format=yuv420p 降 8 bit
+        val swVf = "scale='min($maxPx,iw)':-1,colorspace=iall=auto:all=bt709:range=pc:format=yuv420p"
+        val swInputCmd = "$swCommon -ss $ssStr -i \"$path\" -an -sn -frames:v 1 -vf \"$swVf\" -q:v 3 -y \"${outFile.absolutePath}\""
+        val swOutCmd = "$swCommon -ss ${String.format(Locale.US, "%.3f", preSec)} -i \"$path\" " +
+                "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$swVf\" -q:v 3 -y \"${outFile.absolutePath}\""
 
         return try {
-            runFfmpegOnce(inputSeekCmd, path, timeMs, outFile)
-                ?: runFfmpegOnce(outSeekCmd, path, timeMs, outFile)
+            runFfmpegOnce(hwInputCmd, path, timeMs, outFile)
+                ?: runFfmpegOnce(hwOutCmd, path, timeMs, outFile)
+                ?: runFfmpegOnce(swInputCmd, path, timeMs, outFile)
+                ?: runFfmpegOnce(swOutCmd, path, timeMs, outFile)
         } catch (e: Exception) {
             recordFailure(FailureRecord(
                 at = System.currentTimeMillis(),
                 path = path,
                 fileSize = File(path).length(),
                 timeMs = timeMs,
-                cmd = inputSeekCmd,
+                cmd = hwInputCmd,
                 returnCode = null,
                 stderr = "Exception (outer): ${e.javaClass.simpleName}: ${e.message}",
                 via = "ffmpeg",
