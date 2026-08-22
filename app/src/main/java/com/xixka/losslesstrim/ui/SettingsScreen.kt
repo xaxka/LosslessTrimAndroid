@@ -151,6 +151,8 @@ private fun CacheSection(vm: AppViewModel) {
     val context = LocalContext.current
     val cacheInfo by vm.cacheInfo.collectAsState()
     val clearing by vm.clearingCache.collectAsState()
+    val diagPath by vm.diagPath.collectAsState()
+    val exporting by vm.exportingDiag.collectAsState()
 
     SectionCard(title = null) {
         Text(
@@ -174,6 +176,35 @@ private fun CacheSection(vm: AppViewModel) {
         cacheInfo.lastClearedAt?.let { ts ->
             Text(
                 "上次清除 ${Formats.timeAgo(ts)}",
+                style = MaterialTheme.typography.labelSmall,
+                color = BlExt.textSecondary,
+            )
+        }
+
+        androidx.compose.material3.HorizontalDivider(
+            modifier = Modifier.padding(vertical = 4.dp),
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+        )
+
+        Text(
+            "诊断日志记录 ffmpeg 抽帧失败现场：命令、returnCode、stderr、源文件路径。",
+            style = MaterialTheme.typography.labelSmall,
+            color = BlExt.textSecondary,
+        )
+        BlOutlinedButton(
+            onClick = { vm.exportDiagnostics() },
+            enabled = !exporting,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(if (exporting) "导出中…" else "导出诊断日志") }
+
+        diagPath?.let { p ->
+            Text(
+                "已导出：$p",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.secondary,
+            )
+            Text(
+                "用文件管理器进 Movies/LosslessTrim/ 找到 .txt 分享给我",
                 style = MaterialTheme.typography.labelSmall,
                 color = BlExt.textSecondary,
             )

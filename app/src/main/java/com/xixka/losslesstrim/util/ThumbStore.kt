@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.util.LruCache
 import com.antonkarpenko.ffmpegkit.FFmpegKit
 import kotlinx.coroutines.Dispatchers
@@ -15,6 +16,8 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 /**
@@ -48,9 +51,30 @@ object ThumbStore {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
     }
 
-    /** 失败哨兵：抽帧失败的文件不再重试，避免坏文件每次进页面都空转解码器 */
-    private val failed = object : LruCache<String, Boolean>(64) {
-        override fun sizeOf(key: String, value: Boolean): Int = 1
+    /**
+     * 失败哨兵：抽帧失败的 key 暂记 60s 内不重试，避免拖动切点时高频空转解码器；
+     * **60s 后自动失效**——切回页面 / 重启应用时仍会尝试，让用户看到最新状态
+     * （而不是永久卡"加载中…"）。永久失败会让 ffmpeg-kit 解码器问题导致的
+     * 一次失败成为永久黑名单，掩盖诊断信息。
+     */
+    private const val FAILED_TTL_MS = 60_000L
+
+    private val failed = object : LruCache<String, Long>(128) {
+        override fun sizeOf(key: String, value: Long): Int = 1
+    }
+
+    /** 失败哨兵查询：过期视为未失败（移除并返回 false） */
+    private fun isRecentlyFailed(key: String): Boolean {
+        val ts = failed.get(key) ?: return false
+        if (System.currentTimeMillis() - ts > FAILED_TTL_MS) {
+            failed.remove(key)
+            return false
+        }
+        return true
+    }
+
+    private fun markFailed(key: String) {
+        failed.put(key, System.currentTimeMillis())
     }
 
     /** 磁盘缓存文件数上限（单张 JPEG 仅几十 KB，512 张约几十 MB） */
@@ -89,6 +113,7 @@ object ThumbStore {
         memCache.evictAll()
         failed.evictAll()
         diskDirCache = null     // 强制下次 diskDir() 重新解析（旧的已删）
+        synchronized(recentFailures) { recentFailures.clear() }
         var bytes = 0L
         var files = 0
         // thumbs/ 与 ffmpeg-thumb/ 同在 cacheDir 下；逐目录遍历删除
@@ -110,6 +135,96 @@ object ThumbStore {
 
     /** 清空结果：释放的磁盘字节数 + 删除的文件数 */
     data class ClearResult(val bytes: Long, val files: Int)
+
+    // ---------------- 诊断日志（ffmpeg 抽帧失败现场） ----------------
+
+    /**
+     * 抽帧失败现场记录：包括 ffmpeg 命令、returnCode、stderr tail、源文件路径
+     * 与大小、seek 位置——用户在设置页"导出诊断日志"会输出到 Movies/LosslessTrim/
+     * 下的 .txt，分享后可用于诊断花屏根因。
+     */
+    data class FailureRecord(
+        val at: Long,
+        val path: String?,
+        val fileSize: Long,
+        val timeMs: Long,
+        val cmd: String,
+        val returnCode: Int?,
+        val stderr: String,
+        val via: String,        // "ffmpeg" 或 "platform"
+    )
+
+    private const val MAX_FAILURE_RECORDS = 32
+    private val recentFailures = java.util.Collections.synchronizedList(ArrayList<FailureRecord>())
+
+    /** 记录失败现场（超出上限删最旧） */
+    private fun recordFailure(r: FailureRecord) {
+        recentFailures.add(r)
+        while (recentFailures.size > MAX_FAILURE_RECORDS) {
+            try { recentFailures.removeAt(0) } catch (_: Exception) {}
+        }
+    }
+
+    /** 已收集的失败现场快照（导出时调用，避免持有引用太久） */
+    fun snapshotFailures(): List<FailureRecord> = synchronized(recentFailures) {
+        ArrayList(recentFailures)
+    }
+
+    /**
+     * 导出诊断日志到 Movies/LosslessTrim/thumbstore_diag_<ts>.txt（用户可从文件
+     * 管理器找到分享）。包含：设备信息、ffmpeg-kit 版本、最近 N 次抽帧失败的
+     * 完整命令 + returnCode + stderr + 源文件路径大小。
+     *
+     * 已授予 MANIFEST_EXTERNAL_STORAGE 权限才能写到外部公共目录；未授权写到
+     * app 私有 cacheDir（用户分享时需要进 Android/data/<pkg>/cache/）。
+     */
+    fun exportDiagnostics(context: Context): File? {
+        val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val body = buildDiagnosticsBody(context, ts)
+        // 优先外部公共 Movies（用户能直接看到）；不可用回退 app 私有 files
+        val dir = try {
+            if (Environment.getExternalStorageState() == Environment.MEDIA_MOUNTED) {
+                File(Environment.getExternalStorageDirectory(), "Movies/LosslessTrim").also {
+                    if (!it.exists()) it.mkdirs()
+                }
+            } else null
+        } catch (_: Exception) { null } ?: File(context.filesDir, "diagnostics").also {
+            if (!it.exists()) it.mkdirs()
+        }
+        return try {
+            val file = File(dir, "thumbstore_diag_${ts}.txt")
+            file.bufferedWriter().use { it.write(body) }
+            file
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** 诊断文本组装（独立方法便于测试） */
+    private fun buildDiagnosticsBody(context: Context, tsStr: String): String {
+        val sb = StringBuilder()
+        sb.appendLine("LosslessTrimAndroid ThumbStore diagnostics")
+        sb.appendLine("Exported: $tsStr")
+        sb.appendLine("App: ${context.packageName}")
+        sb.appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL} (API ${Build.VERSION.SDK_INT}, ${Build.DISPLAY})")
+        sb.appendLine("ffmpeg-kit: com.antonkarpenko:ffmpeg-kit-full:2.2.1 (FFmpeg v8.1.1)")
+        sb.appendLine()
+        sb.appendLine("==== Recent failures (${recentFailures.size}) ====")
+        val snapshot = synchronized(recentFailures) { ArrayList(recentFailures) }
+        snapshot.forEachIndexed { i, r ->
+            sb.appendLine("---- #${i + 1} ----")
+            sb.appendLine("Time: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date(r.at))}")
+            sb.appendLine("Source: ${r.path} (${r.fileSize} bytes)")
+            sb.appendLine("SeekMs: ${r.timeMs} (sec ${r.timeMs / 1000.0})")
+            sb.appendLine("Via: ${r.via}")
+            sb.appendLine("ReturnCode: ${r.returnCode}")
+            sb.appendLine("Command: ${r.cmd}")
+            sb.appendLine("Logs (tail 2000 chars):")
+            sb.appendLine(r.stderr.takeLast(2000))
+            sb.appendLine()
+        }
+        return sb.toString()
+    }
 
     /**
      * 异步加载：内存 → 磁盘 → 抽帧。
@@ -137,7 +252,7 @@ object ThumbStore {
         preview: Boolean = false,
     ): Bitmap? {
         memCache.get(key)?.let { return it }
-        if (failed.get(key) != null) return null
+        if (isRecentlyFailed(key)) return null
         val app = context.applicationContext
         if (preview) {
             // 切点预览：绕开 diskCache（可能命中旧 platform 花屏 JPEG），直接 ffmpeg 软解
@@ -155,7 +270,7 @@ object ThumbStore {
                             val platBmp = extractViaPlatform(app, uri, timeMs, maxPx)
                             if (platBmp != null) memCache.put(key, platBmp)
                             platBmp ?: run {
-                                failed.put(key, true)
+                                markFailed(key)
                                 null
                             }
                         }
@@ -177,7 +292,7 @@ object ThumbStore {
                         memCache.put(key, bmp)
                         saveToDisk(app, key, bmp)
                     } ?: run {
-                        failed.put(key, true)
+                        markFailed(key)
                         null
                     }
             }
@@ -198,6 +313,7 @@ object ThumbStore {
      */
     private fun extractViaPlatform(context: Context, uri: Uri, timeMs: Long, maxPx: Int): Bitmap? {
         val mmr = MediaMetadataRetriever()
+        var unhealthy = false
         return try {
             mmr.setDataSource(context, uri)
             val timeUs = timeMs * 1000L
@@ -210,19 +326,52 @@ object ThumbStore {
                 scaleAndRecycle(orig, maxPx)
             }
             if (bmp != null && isBitmapHealthy(bmp)) bmp else {
-                // 不健康：典型表现是绿屏/粉红条带/绿红紫混合花屏，caller 会回退 ffmpeg
+                // 不健康：典型表现是绿屏/粉红条带/绿红紫混合花屏
+                unhealthy = bmp != null
                 bmp?.recycle()
                 null
             }
         } catch (e: Exception) {
+            recordFailure(FailureRecord(
+                at = System.currentTimeMillis(),
+                path = runCatchingPath(context, uri),
+                fileSize = runCatchingFileSize(context, uri),
+                timeMs = timeMs,
+                cmd = "(platform MediaMetadataRetriever OPTION_CLOSEST maxPx=$maxPx)",
+                returnCode = null,
+                stderr = "Exception: ${e.javaClass.simpleName}: ${e.message}",
+                via = "platform",
+            ))
             null
         } finally {
             try {
                 mmr.release()
             } catch (_: Exception) {
             }
+            if (unhealthy) {
+                recordFailure(FailureRecord(
+                    at = System.currentTimeMillis(),
+                    path = runCatchingPath(context, uri),
+                    fileSize = runCatchingFileSize(context, uri),
+                    timeMs = timeMs,
+                    cmd = "(platform MediaMetadataRetriever OPTION_CLOSEST maxPx=$maxPx)",
+                    returnCode = null,
+                    stderr = "Bitmap returned but isBitmapHealthy rejected (stddev<3 single-color or stddev>95 striped)",
+                    via = "platform",
+                ))
+            }
         }
     }
+
+    /** 同步取路径（不影响 platform 抽帧主流程） */
+    private fun runCatchingPath(context: Context, uri: Uri): String? = try {
+        StorageAccess.accessibleFile(context, uri)?.absolutePath
+    } catch (_: Exception) { null }
+
+    /** 同步取文件大小（失败返回 0） */
+    private fun runCatchingFileSize(context: Context, uri: Uri): Long = try {
+        StorageAccess.accessibleFile(context, uri)?.length() ?: 0L
+    } catch (_: Exception) { 0L }
 
     /**
      * ffmpeg 软解抽帧（platform 失败/不健康时回退）。启动 ffmpeg 抽 1 帧 JPEG
@@ -262,19 +411,59 @@ object ThumbStore {
         return try {
             val session = FFmpegKit.execute(cmd)
             val rc = session.returnCode
+            // 收集日志用于诊断（allLogsAsString 在 session history=2 下可能丢，
+            // 但 execute 同步返回时 session 仍在 history 内，logs 完整）
+            val logs = try { session.allLogsAsString } catch (_: Exception) { null } ?: ""
             try {
                 if (rc != null && rc.isValueSuccess && outFile.exists() && outFile.length() > 0) {
                     val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
                     val bmp = BitmapFactory.decodeFile(outFile.absolutePath, opts)
                     if (bmp != null && isBitmapHealthy(bmp)) bmp else {
+                        // ffmpeg "成功"但 Bitmap 不健康——这种情况典型是 -skip_frame nokey
+                        // 仍抽到坏帧（极少见，记录诊断让用户能上报）
+                        recordFailure(FailureRecord(
+                            at = System.currentTimeMillis(),
+                            path = path,
+                            fileSize = File(path).length(),
+                            timeMs = timeMs,
+                            cmd = cmd,
+                            returnCode = rc?.value,
+                            stderr = "rc=success but isBitmapHealthy rejected (stddev<3 or stddev>95). " +
+                                    "outfile=${outFile.length()}B. Logs:\n$logs",
+                            via = "ffmpeg",
+                        ))
                         bmp?.recycle()
                         null
                     }
-                } else null
+                } else {
+                    // rc 非 success 或输出文件为空：典型 ffmpeg 解码失败/路径错
+                    recordFailure(FailureRecord(
+                        at = System.currentTimeMillis(),
+                        path = path,
+                        fileSize = File(path).length(),
+                        timeMs = timeMs,
+                        cmd = cmd,
+                        returnCode = rc?.value,
+                        stderr = "rc=${rc?.value} outfile_exists=${outFile.exists()} " +
+                                "outfile_size=${outFile.length()}. Logs:\n$logs",
+                        via = "ffmpeg",
+                    ))
+                    null
+                }
             } finally {
                 try { outFile.delete() } catch (_: Exception) {}
             }
         } catch (e: Exception) {
+            recordFailure(FailureRecord(
+                at = System.currentTimeMillis(),
+                path = path,
+                fileSize = File(path).length(),
+                timeMs = timeMs,
+                cmd = cmd,
+                returnCode = null,
+                stderr = "Exception: ${e.javaClass.simpleName}: ${e.message}",
+                via = "ffmpeg",
+            ))
             null
         }
     }

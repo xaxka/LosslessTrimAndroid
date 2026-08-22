@@ -436,4 +436,33 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+
+    /** 最近导出诊断的文件路径（用于在 UI 上显示让用户去找） */
+    private val _diagPath = MutableStateFlow<String?>(null)
+    val diagPath = _diagPath.asStateFlow()
+
+    private val _exportingDiag = MutableStateFlow(false)
+    val exportingDiag = _exportingDiag.asStateFlow()
+
+    /**
+     * 导出诊断日志到 Movies/LosslessTrim/thumbstore_diag_<ts>.txt。包含设备信息、
+     * ffmpeg-kit 版本、最近 N 次抽帧失败的命令/returnCode/stderr/源文件路径。
+     * 用户分享后可用于诊断花屏/卡加载中根因。导出文件路径会在 UI 显示。
+     */
+    fun exportDiagnostics() {
+        if (_exportingDiag.value) return
+        viewModelScope.launch {
+            _exportingDiag.value = true
+            try {
+                val app = getApplication<Application>()
+                val file = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.xixka.losslesstrim.util.ThumbStore.exportDiagnostics(app)
+                }
+                _diagPath.value = file?.absolutePath
+                    ?: "导出失败（写入失败，可能未授予\"所有文件\"权限）"
+            } finally {
+                _exportingDiag.value = false
+            }
+        }
+    }
 }
