@@ -454,7 +454,7 @@ object ThumbStore {
         // 但 execute 同步返回时 session 仍在 history 内，logs 完整）
         val logs = try { session.allLogsAsString } catch (_: Exception) { null } ?: ""
         try {
-            if (rc != null && rc.isValueSuccess && outFile.exists() && outFile.length() > 0) {
+            return if (rc != null && rc.isValueSuccess && outFile.exists() && outFile.length() > 0) {
                 val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
                 val bmp = BitmapFactory.decodeFile(outFile.absolutePath, opts)
                 if (bmp != null && isBitmapHealthy(bmp)) bmp else {
