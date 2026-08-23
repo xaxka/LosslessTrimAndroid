@@ -397,23 +397,23 @@ object ThumbStore {
         val outFile = File(outDir, "ff_${System.currentTimeMillis()}_${Thread.currentThread().id}.jpg")
         val ss = (timeMs / 1000.0).coerceAtLeast(0.0)
         val ssStr = String.format(Locale.US, "%.3f", ss)
-        // === 缩略图抽帧策略（2026-08-22 重构）===
+        // === 缩略图抽帧策略（2026-08-23 重构）===
         // 根因：视频是 limited range (tv, Y:16-235)，JPEG 需要 full range (pc, 0-255)
         // FFmpeg 默认不做 range 转换，直接把 limited range 数据塞进 JPEG → 颜色错乱/花屏
         // 修复：scale 滤镜加 out_range=pc 做 limited→full range 转换
         // 参考StackOverflow: https://stackoverflow.com/questions/74350828
         //
-        // 优先软件解码（软解对 10-bit HEVC / 不标准 MP4 的颜色与 range 最可靠），
-        // 失败回退硬件解码（mediacodec 快，但 10-bit 输出元数据/颜色不可靠，仅兜底）。
+        // 硬解（mediacodec）：GPU 解 HEVC 快 5-10x，输出 NV12 8-bit；
+        //   10-bit HEVC 输出元数据/颜色可能不可靠 → isBitmapHealthy 检测不健康时回退软解
         // 软解：native hevc/x265 软解，10-bit → 8-bit 颜色正确；**不再用 -skip_frame nokey**——
         //   它只解 I 帧，与 -ss input seek 组合时（目标点之前的 I 帧被 seek 丢弃、
         //   目标点又是 P/B 帧被跳过）会导致 Filtergraph 无帧输出，抽帧必然失败。
-        // 硬解：GPU 解 HEVC 快 5-10x，输出 NV12 8-bit
-        // 回退链（有最近关键帧）：sw-out-seek(kf) → sw-input-seek → hw-input-seek → hw-out-seek
-        //   有最近关键帧时两阶段 seek 优先：output-seek 阶段 ffmpeg 内部 AVDiscard 跳非参考帧加速
-        // 回退链（无关键帧信息）：sw-input-seek → sw-out-seek → hw-input-seek → hw-out-seek
+        // 回退链（预览，有最近关键帧）：hw-out-seek(kf) → hw-input-seek → sw-out-seek → sw-input-seek
+        //   硬解优先（快），不健康/失败回退软解（颜色可靠）
+        // 回退链（列表，无关键帧信息）：sw-input-seek → sw-out-seek → hw-input-seek → hw-out-seek
+        //   软解优先（起点近关键帧解码量小，颜色可靠）
 
-        // --- 软件解码命令（优先）---
+        // --- 软件解码命令 ---
         val swCommon = "-hide_banner -loglevel info -err_detect ignore_err -threads 4"
         val swVf = "scale='min($maxPx,iw)':-1:in_color_matrix=auto:out_color_matrix=bt709:out_range=pc"
         val swInputCmd = "$swCommon -ss $ssStr -i \"$path\" -an -sn -frames:v 1 -vf \"$swVf\" -q:v 3 -y \"${outFile.absolutePath}\""
@@ -424,23 +424,23 @@ object ThumbStore {
         val swOutCmd = "$swCommon -ss ${String.format(Locale.US, "%.3f", preSec)} -i \"$path\" " +
                 "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$swVf\" -q:v 3 -y \"${outFile.absolutePath}\""
 
-        // --- 硬件解码命令（软解失败兜底）---
+        // --- 硬件解码命令 ---
         val hwCommon = "-hide_banner -loglevel info -err_detect ignore_err -hwaccel mediacodec -threads 4"
         val hwVf = "scale='min($maxPx,iw)':-1:in_color_matrix=auto:out_color_matrix=bt709:out_range=pc"
         val hwInputCmd = "$hwCommon -ss $ssStr -i \"$path\" -an -sn -frames:v 1 -vf \"$hwVf\" -q:v 3 -y \"${outFile.absolutePath}\""
         val hwOutCmd = "$hwCommon -ss ${String.format(Locale.US, "%.3f", preSec)} -i \"$path\" " +
                 "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$hwVf\" -q:v 3 -y \"${outFile.absolutePath}\""
 
-        val firstCmd = if (nearestKfSec != null) swOutCmd else swInputCmd
+        val firstCmd = if (nearestKfSec != null) hwOutCmd else swInputCmd
         return try {
             if (nearestKfSec != null) {
-                // 有最近关键帧：两阶段 seek 优先（output-seek 阶段 AVDiscard 跳非参考帧加速）
-                runFfmpegOnce(swOutCmd, path, timeMs, outFile)
-                    ?: runFfmpegOnce(swInputCmd, path, timeMs, outFile)
+                // 预览路径：硬解优先（快 5-10x），不健康/失败回退软解（颜色可靠）
+                runFfmpegOnce(hwOutCmd, path, timeMs, outFile)
                     ?: runFfmpegOnce(hwInputCmd, path, timeMs, outFile)
-                    ?: runFfmpegOnce(hwOutCmd, path, timeMs, outFile)
+                    ?: runFfmpegOnce(swOutCmd, path, timeMs, outFile)
+                    ?: runFfmpegOnce(swInputCmd, path, timeMs, outFile)
             } else {
-                // 无关键帧信息：input-seek 优先（兼容旧逻辑）
+                // 列表缩略图：软解优先（起点近关键帧，解码量小，颜色可靠）
                 runFfmpegOnce(swInputCmd, path, timeMs, outFile)
                     ?: runFfmpegOnce(swOutCmd, path, timeMs, outFile)
                     ?: runFfmpegOnce(hwInputCmd, path, timeMs, outFile)
