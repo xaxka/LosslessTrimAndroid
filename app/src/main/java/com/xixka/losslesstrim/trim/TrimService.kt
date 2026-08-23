@@ -199,6 +199,15 @@ class TrimService : Service() {
             if (target.muxer == "mpegts" || target.muxer == "mpeg") " -muxdelay 0 -muxpreload 0" else ""
 
         /**
+         * matroska 输出不强制字幕 default（`-default_mode infer_no_subs`）：
+         * 源里字幕非 default 时，剪出后不应被 muxer 强加成 default——
+         * 分享场景强制弹字幕不友好（LosslessCut 同款，issue #972）。
+         * webm 不加：webm profile 严格，私有选项可能被拒。
+         */
+        fun matroskaFlagsArgs(target: OutputTarget): String =
+            if (target.muxer == "matroska" && target.ext != "webm") " -default_mode infer_no_subs" else ""
+
+        /**
          * 成功但有兼容风险的非阻断提示（纯函数，单测覆盖）：
          * 1. 旋转元数据 × MKV 输出：数据层面 ffmpeg≥6.1 会写 Projection 元素
          *    保留，但部分播放器（硬解播放器/旧 Android）不识别 → 横屏显示；
@@ -293,7 +302,9 @@ class TrimService : Service() {
             }
             sb.append(dispositionArgs(probe, kept))
             sb.append(muxDelayArgs(target))
-            if (target.muxer == "mp4") sb.append(" -movflags +faststart")
+            sb.append(matroskaFlagsArgs(target))
+            if (target.muxer == "mp4") sb.append(" -movflags +faststart+use_metadata_tags")
+            sb.append(" -ignore_unknown")
             sb.append(" -f ").append(target.muxer)
             sb.append(" \"").append(outParam).append("\"")
             return sb.toString()

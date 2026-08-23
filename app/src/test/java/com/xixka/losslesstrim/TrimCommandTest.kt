@@ -166,6 +166,17 @@ class TrimCommandTest {
         assertEquals("", TrimService.muxDelayArgs(OutputTarget("matroska", "mkv", "video/x-matroska")))
     }
 
+    @Test
+    fun `mkv output disables forced subtitle default`() {
+        assertEquals(
+            " -default_mode infer_no_subs",
+            TrimService.matroskaFlagsArgs(OutputTarget("matroska", "mkv", "video/x-matroska")),
+        )
+        assertEquals("", TrimService.matroskaFlagsArgs(OutputTarget("matroska", "webm", "video/webm")))
+        assertEquals("", TrimService.matroskaFlagsArgs(OutputTarget("mp4", "mp4", "video/mp4")))
+        assertEquals("", TrimService.matroskaFlagsArgs(OutputTarget("mpegts", "ts", "video/mp2ts")))
+    }
+
     // ---------- timelineWarnings ----------
 
     private fun videoStream(
@@ -329,7 +340,7 @@ class TrimCommandTest {
                 "-map 0:0 -map 0:1 -map 0:2 -map 0:t? -c copy -map_metadata 0 -map_chapters 0 " +
                 "-avoid_negative_ts make_zero " +
                 "-bsf:s setts=duration=if(gte(DURATION\\,0)\\,max(min(DURATION\\,(29.846/TB)-TS)\\,0)\\,0) " +
-                "-disposition:a:0 default -f matroska \"/out.mkv\"",
+                "-disposition:a:0 default -default_mode infer_no_subs -ignore_unknown -f matroska \"/out.mkv\"",
             cmd,
         )
     }
@@ -348,7 +359,7 @@ class TrimCommandTest {
             "-hide_banner -y -i \"/in.mkv\" -t 30.000 " +
                 "-map 0:0 -map 0:1 -map 0:2 -map 0:t? -c copy -map_metadata 0 -map_chapters 0 " +
                 "-bsf:s setts=duration=if(gte(DURATION\\,0)\\,max(min(DURATION\\,(30.000/TB)-TS)\\,0)\\,0) " +
-                "-disposition:a:0 default -f matroska \"/out.mkv\"",
+                "-disposition:a:0 default -default_mode infer_no_subs -ignore_unknown -f matroska \"/out.mkv\"",
             cmd,
         )
     }
@@ -380,7 +391,7 @@ class TrimCommandTest {
             "-hide_banner -y -ss 30.000 -noaccurate_seek -i \"/in.mp4\" -t 30.000 " +
                 "-map 0:0 -map 0:1 -map 0:s? -c copy -map_metadata 0 -map_chapters 0 " +
                 "-avoid_negative_ts make_zero " +
-                "-disposition:a:0 default -movflags +faststart -f mp4 \"/out.mp4\"",
+                "-disposition:a:0 default -movflags +faststart+use_metadata_tags -ignore_unknown -f mp4 \"/out.mp4\"",
             cmd,
         )
     }
