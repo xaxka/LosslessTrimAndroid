@@ -289,16 +289,20 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                     val dE = plan.actualEnd - plan.requestedEnd
                     Text(
                         buildString {
-                            append("设定起点 ").append(Formats.clockMs(plan.requestedStart))
-                            append(" → 实际 ").append(Formats.clockMs(plan.actualStart))
-                            append("（${if (dS >= 0) "+" else ""}${String.format(Locale.US, "%.1f", dS)}s）\n")
-                            append("设定终点 ").append(Formats.clockMs(plan.requestedEnd))
-                            append(" → 实际 ").append(Formats.clockMs(plan.actualEnd))
-                            append("（${if (dE >= 0) "+" else ""}${String.format(Locale.US, "%.1f", dE)}s）")
-                            if (plan.truncated) append("（终点超片长已截断）")
-                            if (kfs.isEmpty()) append("\n（无关键帧信息：切点不做对齐）")
+                            if (kfs.isEmpty()) {
+                                append("无关键帧信息，切点不做对齐")
+                            } else {
+                                append("对齐 起 ")
+                                append(if (dS >= 0) "+" else "")
+                                append(String.format(Locale.US, "%.1f", dS))
+                                append("s  止 ")
+                                append(if (dE >= 0) "+" else "")
+                                append(String.format(Locale.US, "%.1f", dE))
+                                append("s")
+                            }
+                            if (plan.truncated) append("  · 终点超片长已截断")
                         },
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.labelSmall,
                         color = BlExt.textSecondary,
                     )
                 } else {
