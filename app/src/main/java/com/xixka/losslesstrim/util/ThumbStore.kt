@@ -261,6 +261,7 @@ object ThumbStore {
         maxPx: Int,
         preview: Boolean = false,
         nearestKfSec: Double? = null,
+        allowHw: Boolean = true,
     ): Bitmap? {
         memCache.get(key)?.let { return it }
         if (isRecentlyFailed(key)) return null
@@ -270,7 +271,7 @@ object ThumbStore {
             return previewSemaphore.withPermit {
                 withContext(Dispatchers.IO) {
                     memCache.get(key) ?: run {
-                        val ffmpegBmp = extractViaFfmpeg(app, uri, timeMs, maxPx, nearestKfSec)
+                        val ffmpegBmp = extractViaFfmpeg(app, uri, timeMs, maxPx, nearestKfSec, allowHw)
                         if (ffmpegBmp != null) {
                             memCache.put(key, ffmpegBmp)
                             saveToDisk(app, key, ffmpegBmp)
@@ -299,7 +300,7 @@ object ThumbStore {
             withContext(Dispatchers.IO) {
                 memCache.get(key)
                     ?: loadFromDisk(app, key)   // 排队期间可能已被其它协程写入缓存
-                    ?: extractViaFfmpeg(app, uri, timeMs, maxPx)?.also { bmp ->
+                    ?: extractViaFfmpeg(app, uri, timeMs, maxPx, allowHw = allowHw)?.also { bmp ->
                         memCache.put(key, bmp)
                         saveToDisk(app, key, bmp)
                     } ?: extractViaPlatform(app, uri, timeMs, maxPx)?.also { bmp ->
@@ -400,7 +401,7 @@ object ThumbStore {
      *
      * 单次约 80~200ms：每分析页最多两张切点抽帧 + 拖动 200ms 防抖，可接受。
      */
-    private fun extractViaFfmpeg(context: Context, uri: Uri, timeMs: Long, maxPx: Int, nearestKfSec: Double? = null): Bitmap? {
+    private fun extractViaFfmpeg(context: Context, uri: Uri, timeMs: Long, maxPx: Int, nearestKfSec: Double? = null, allowHw: Boolean = true): Bitmap? {
         val path = StorageAccess.accessibleFile(context, uri)?.absolutePath ?: return null
         val outDir = File(context.cacheDir, FFMPEG_THUMB_DIR)
         if (!outDir.exists()) outDir.mkdirs()
@@ -448,7 +449,8 @@ object ThumbStore {
                 "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$hwVf\" -q:v 3 -y \"${outFile.absolutePath}\""
 
         val firstCmd = if (nearestKfSec != null) swOutCmd else swInputCmd
-        val hwDecode = hwDecodeEnabled   // 设置页开关：默认软解，用户显式开启才走硬解链
+        // 设置页开关 × 调用方资格（10-bit 文件由 ProbeResult.hwThumbEligible 判定，硬解颜色不可靠）
+        val hwDecode = hwDecodeEnabled && allowHw
         return try {
             if (nearestKfSec != null) {
                 // 有最近关键帧：两阶段 seek 优先（output-seek 阶段 AVDiscard 跳非参考帧加速）

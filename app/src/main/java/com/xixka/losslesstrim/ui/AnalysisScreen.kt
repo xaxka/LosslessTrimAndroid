@@ -276,6 +276,8 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                         { d -> tailText = stepSeconds(Formats.parseSeconds(tailText), d) }
                     else
                         { d -> endText = stepClock(endText, d) }
+                    // 10-bit 文件硬解颜色不可靠 → 两个切点预览都不给硬解资格
+                    val allowHw = entry.probe.hwThumbEligible
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         FramePreview(
                             uri = entry.docUri,
@@ -286,6 +288,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                             modifier = Modifier.weight(1f),
                             nearestKfSec = kfs.lastOrNull { it <= plan.actualStart },
                             onStep = startOnStep,
+                            allowHw = allowHw,
                         )
                         FramePreview(
                             uri = entry.docUri,
@@ -296,6 +299,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                             modifier = Modifier.weight(1f),
                             nearestKfSec = kfs.lastOrNull { it <= endFrameSec },
                             onStep = endOnStep,
+                            allowHw = allowHw,
                         )
                     }
 

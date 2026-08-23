@@ -351,6 +351,7 @@ object ProbeStore {
             s.hasBFrames?.let { o.put("hasBFrames", it) }
             s.rotation?.let { o.put("rotation", it) }
             s.codecTag?.let { o.put("codecTag", it) }
+            s.pixFmt?.let { o.put("pixFmt", it) }
             arr.put(o)
         }
         return arr.toString()
@@ -377,6 +378,8 @@ object ProbeStore {
                     hasBFrames = if (o.has("hasBFrames")) o.optInt("hasBFrames") else null,
                     rotation = if (o.has("rotation")) o.optInt("rotation") else null,
                     codecTag = o.optString("codecTag").takeIf { it.isNotEmpty() },
+                    // 旧缓存行无此字段 → null（未知，硬解分流按保守软解处理）
+                    pixFmt = o.optString("pixFmt").takeIf { it.isNotEmpty() },
                 )
             )
         }

@@ -675,6 +675,7 @@ object Probe {
                         hasBFrames = if (s.has("has_b_frames")) s.optInt("has_b_frames") else null,
                         rotation = parseRotation(s.optJSONArray("side_data_list")),
                         codecTag = parseCodecTag(s.optString("codec_tag_string")),
+                        pixFmt = s.optString("pix_fmt").takeIf { it.isNotEmpty() },
                     )
                 )
                 if (duration == null) {

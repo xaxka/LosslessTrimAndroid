@@ -374,7 +374,8 @@ fun HomeScreen(
                                     .padding(vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                VideoThumb(e.docUri, identity = e.sizeBytes.toString())
+                                // 10-bit 文件硬解颜色不可靠 → 不给硬解资格（ProbeResult.hwThumbEligible）
+                                VideoThumb(e.docUri, identity = e.sizeBytes.toString(), allowHw = e.probe.hwThumbEligible)
                                 Spacer(Modifier.padding(6.dp))
                                 Column(Modifier.weight(1f)) {
                                     Text(

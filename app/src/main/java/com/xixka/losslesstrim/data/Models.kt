@@ -31,11 +31,18 @@ data class StreamInfo(
     // ffprobe codec_tag_string（清掉 \0 填充后），用于识别 Dolby Vision
     // （dvh1/dvhe/dva1/dvav；codec_name 对 DV 仍报 hevc/avc，靠 tag 区分）
     val codecTag: String? = null,
+    // ffprobe pix_fmt（视频流像素格式，如 yuv420p / yuv420p10le）。
+    // null=未知（platform 兜底探测 / 旧缓存行）。10-bit 判定的依据：
+    // mediacodec 硬解 10-bit HEVC 的缩略图颜色不可靠 → 自动走软解
+    val pixFmt: String? = null,
 ) {
     val isVideo: Boolean get() = codecType == "video" && !attachedPic
     val isAudio: Boolean get() = codecType == "audio"
     val isSubtitle: Boolean get() = codecType == "subtitle"
     val isCover: Boolean get() = codecType == "video" && attachedPic
+
+    /** 10-bit 像素格式（yuv420p10le / p010le 等含 "10"）；null（未知）不算 */
+    val is10Bit: Boolean get() = pixFmt?.contains("10") == true
 
     /**
      * Dolby Vision 流（mp4/mov 里 tag 为 dvh1/dvhe/dva1/dvav；mkv 的 DV 无
@@ -91,6 +98,14 @@ data class ProbeResult(
 ) {
     val videoCodec: String?
         get() = streams.firstOrNull { it.isVideo }?.codecName
+
+    /**
+     * 缩略图能否走硬解（mediacodec）：仅当存在视频流且**确认是 8-bit**。
+     * 10-bit（yuv420p10le/p010le）硬解颜色不可靠 → 软解；
+     * pix_fmt 未知（null，platform 兜底/旧缓存）→ 保守软解。
+     */
+    val hwThumbEligible: Boolean
+        get() = streams.firstOrNull { it.isVideo }?.let { it.pixFmt != null && !it.is10Bit } == true
 }
 
 /** 列表里的一条视频 */
