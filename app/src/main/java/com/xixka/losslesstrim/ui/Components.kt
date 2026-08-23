@@ -24,6 +24,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
@@ -284,6 +286,7 @@ fun FramePreview(
     identity: String? = null,
     modifier: Modifier = Modifier,
     nearestKfSec: Double? = null,
+    onStep: ((Int) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val timeMs = (tSec * 1000.0).roundToLong()
@@ -326,7 +329,26 @@ fun FramePreview(
         }
         Spacer(Modifier.height(4.dp))
         Text(label, style = MaterialTheme.typography.labelSmall)
-        Text(timeLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(timeLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+            if (onStep != null) {
+                Box(
+                    Modifier.size(width = 24.dp, height = 22.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .clickable { onStep(-1) },
+                    contentAlignment = Alignment.Center,
+                ) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "$label -1秒", modifier = Modifier.size(16.dp)) }
+                Box(
+                    Modifier.size(width = 24.dp, height = 22.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .clickable { onStep(+1) },
+                    contentAlignment = Alignment.Center,
+                ) { Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "$label +1秒", modifier = Modifier.size(16.dp)) }
+            }
+        }
     }
 }
 

@@ -266,6 +266,14 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                     // actualStart/actualEnd 经关键帧对齐后均在 kfs 中，
                     // nearestKfSec = 自身 → 两阶段 seek outDelta=0 → 零解码瞬间出图
                     val endFrameSec = plan.actualEnd
+                    val startOnStep: (Int) -> Unit = if (settings.mode == TrimMode.HEAD_TAIL)
+                        { d -> headText = stepSeconds(Formats.parseSeconds(headText), d) }
+                    else
+                        { d -> startText = stepClock(startText, d) }
+                    val endOnStep: (Int) -> Unit = if (settings.mode == TrimMode.HEAD_TAIL)
+                        { d -> tailText = stepSeconds(Formats.parseSeconds(tailText), d) }
+                    else
+                        { d -> endText = stepClock(endText, d) }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         FramePreview(
                             uri = entry.docUri,
@@ -275,6 +283,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                             identity = entry.sizeBytes.toString(),
                             modifier = Modifier.weight(1f),
                             nearestKfSec = kfs.lastOrNull { it <= plan.actualStart },
+                            onStep = startOnStep,
                         )
                         FramePreview(
                             uri = entry.docUri,
@@ -284,6 +293,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                             identity = entry.sizeBytes.toString(),
                             modifier = Modifier.weight(1f),
                             nearestKfSec = kfs.lastOrNull { it <= endFrameSec },
+                            onStep = endOnStep,
                         )
                     }
 
@@ -419,6 +429,13 @@ private fun stepSeconds(cur: Double?, delta: Int): String {
     val v = cur ?: 0.0
     val next = if (delta > 0) kotlin.math.floor(v) + delta else kotlin.math.ceil(v) + delta
     return next.toInt().coerceAtLeast(0).toString()
+}
+
+/** 步进 ±1 秒（分:秒 格式）；结果钳制 ≥ 0，-1（未设）按 0 处理 */
+private fun stepClock(curText: String, delta: Int): String {
+    val cur = (Formats.parseTime(curText) ?: 0.0).coerceAtLeast(0.0)
+    val next = (cur + delta).coerceAtLeast(0.0)
+    return Formats.clock(next)
 }
 
 /**
