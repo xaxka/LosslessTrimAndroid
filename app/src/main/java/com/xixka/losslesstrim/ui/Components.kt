@@ -283,6 +283,7 @@ fun FramePreview(
     timeLabel: String,
     identity: String? = null,
     modifier: Modifier = Modifier,
+    nearestKfSec: Double? = null,
 ) {
     val context = LocalContext.current
     val timeMs = (tSec * 1000.0).roundToLong()
@@ -295,7 +296,7 @@ fun FramePreview(
             if (bmp == null) {
                 // 预览窗口按列宽自适应（fillMaxWidth + 16:9），最高密度出 384px 宽小图足够；
                 // preview=true 走独立并发池，不与首页列表缩略图抢位
-                bmp = ThumbStore.thumb(context, key, uri, timeMs, maxPx = 384, preview = true)
+                bmp = ThumbStore.thumb(context, key, uri, timeMs, maxPx = 384, preview = true, nearestKfSec = nearestKfSec)
             }
         }
     }

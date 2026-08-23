@@ -250,6 +250,7 @@ object ThumbStore {
         timeMs: Long = 0L,
         maxPx: Int,
         preview: Boolean = false,
+        nearestKfSec: Double? = null,
     ): Bitmap? {
         memCache.get(key)?.let { return it }
         if (isRecentlyFailed(key)) return null
@@ -259,7 +260,7 @@ object ThumbStore {
             return previewSemaphore.withPermit {
                 withContext(Dispatchers.IO) {
                     memCache.get(key) ?: run {
-                        val ffmpegBmp = extractViaFfmpeg(app, uri, timeMs, maxPx)
+                        val ffmpegBmp = extractViaFfmpeg(app, uri, timeMs, maxPx, nearestKfSec)
                         if (ffmpegBmp != null) {
                             memCache.put(key, ffmpegBmp)
                             saveToDisk(app, key, ffmpegBmp)
@@ -389,7 +390,7 @@ object ThumbStore {
      *
      * 单次约 80~200ms：每分析页最多两张切点抽帧 + 拖动 200ms 防抖，可接受。
      */
-    private fun extractViaFfmpeg(context: Context, uri: Uri, timeMs: Long, maxPx: Int): Bitmap? {
+    private fun extractViaFfmpeg(context: Context, uri: Uri, timeMs: Long, maxPx: Int, nearestKfSec: Double? = null): Bitmap? {
         val path = StorageAccess.accessibleFile(context, uri)?.absolutePath ?: return null
         val outDir = File(context.cacheDir, FFMPEG_THUMB_DIR)
         if (!outDir.exists()) outDir.mkdirs()
@@ -408,13 +409,17 @@ object ThumbStore {
         //   它只解 I 帧，与 -ss input seek 组合时（目标点之前的 I 帧被 seek 丢弃、
         //   目标点又是 P/B 帧被跳过）会导致 Filtergraph 无帧输出，抽帧必然失败。
         // 硬解：GPU 解 HEVC 快 5-10x，输出 NV12 8-bit
-        // 回退链：sw-input-seek → sw-out-seek → hw-input-seek → hw-out-seek
+        // 回退链（有最近关键帧）：sw-out-seek(kf) → sw-input-seek → hw-input-seek → hw-out-seek
+        //   有最近关键帧时两阶段 seek 优先：output-seek 阶段 ffmpeg 内部 AVDiscard 跳非参考帧加速
+        // 回退链（无关键帧信息）：sw-input-seek → sw-out-seek → hw-input-seek → hw-out-seek
 
         // --- 软件解码命令（优先）---
         val swCommon = "-hide_banner -loglevel info -err_detect ignore_err -threads 4"
         val swVf = "scale='min($maxPx,iw)':-1:in_color_matrix=auto:out_color_matrix=bt709:out_range=pc"
         val swInputCmd = "$swCommon -ss $ssStr -i \"$path\" -an -sn -frames:v 1 -vf \"$swVf\" -q:v 3 -y \"${outFile.absolutePath}\""
-        val preSec = (ss - 30.0).coerceAtLeast(0.0)
+        // 有关键帧信息时用最近关键帧做 pre-seek（output-seek 距离最小，AVDiscard 加速），
+        // 无关键帧信息时回退固定 30s pre-buffer
+        val preSec = nearestKfSec?.coerceIn(0.0, ss) ?: (ss - 30.0).coerceAtLeast(0.0)
         val outDelta = ss - preSec
         val swOutCmd = "$swCommon -ss ${String.format(Locale.US, "%.3f", preSec)} -i \"$path\" " +
                 "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$swVf\" -q:v 3 -y \"${outFile.absolutePath}\""
@@ -426,18 +431,28 @@ object ThumbStore {
         val hwOutCmd = "$hwCommon -ss ${String.format(Locale.US, "%.3f", preSec)} -i \"$path\" " +
                 "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$hwVf\" -q:v 3 -y \"${outFile.absolutePath}\""
 
+        val firstCmd = if (nearestKfSec != null) swOutCmd else swInputCmd
         return try {
-            runFfmpegOnce(swInputCmd, path, timeMs, outFile)
-                ?: runFfmpegOnce(swOutCmd, path, timeMs, outFile)
-                ?: runFfmpegOnce(hwInputCmd, path, timeMs, outFile)
-                ?: runFfmpegOnce(hwOutCmd, path, timeMs, outFile)
+            if (nearestKfSec != null) {
+                // 有最近关键帧：两阶段 seek 优先（output-seek 阶段 AVDiscard 跳非参考帧加速）
+                runFfmpegOnce(swOutCmd, path, timeMs, outFile)
+                    ?: runFfmpegOnce(swInputCmd, path, timeMs, outFile)
+                    ?: runFfmpegOnce(hwInputCmd, path, timeMs, outFile)
+                    ?: runFfmpegOnce(hwOutCmd, path, timeMs, outFile)
+            } else {
+                // 无关键帧信息：input-seek 优先（兼容旧逻辑）
+                runFfmpegOnce(swInputCmd, path, timeMs, outFile)
+                    ?: runFfmpegOnce(swOutCmd, path, timeMs, outFile)
+                    ?: runFfmpegOnce(hwInputCmd, path, timeMs, outFile)
+                    ?: runFfmpegOnce(hwOutCmd, path, timeMs, outFile)
+            }
         } catch (e: Exception) {
             recordFailure(FailureRecord(
                 at = System.currentTimeMillis(),
                 path = path,
                 fileSize = File(path).length(),
                 timeMs = timeMs,
-                cmd = swInputCmd,
+                cmd = firstCmd,
                 returnCode = null,
                 stderr = "Exception (outer): ${e.javaClass.simpleName}: ${e.message}",
                 via = "ffmpeg",

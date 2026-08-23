@@ -262,26 +262,28 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
 
                 if (plan.ok) {
                     // ---------- 切点抽帧（合并进时间轴卡片，缩略图占满宽） ----------
+                    // 无损切割切在关键帧上 → 预览就看关键帧本身：
+                    // actualStart/actualEnd 经关键帧对齐后均在 kfs 中，
+                    // nearestKfSec = 自身 → 两阶段 seek outDelta=0 → 零解码瞬间出图
+                    val endFrameSec = plan.actualEnd
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         FramePreview(
                             uri = entry.docUri,
                             tSec = plan.actualStart,
-                            label = "起点后第 1 帧",
+                            label = "起点关键帧",
                             timeLabel = Formats.clockMs(plan.actualStart),
                             identity = entry.sizeBytes.toString(),
                             modifier = Modifier.weight(1f),
+                            nearestKfSec = kfs.lastOrNull { it <= plan.actualStart },
                         )
                         FramePreview(
                             uri = entry.docUri,
-                            // 终点抽帧：actualEnd - 1.0（不是 - 0.2）。actualEnd 经关键帧
-                            // 对齐后通常 = dur（最后关键帧），actualEnd - 0.2 落在 EOF 边界
-                            // 附近，ffmpeg input-seek 跳过 EOF 找不到关键帧 → 不输出文件
-                            // → 诊断日志看到 rc=0 outfile_exists=false（用户实测复现）
-                            tSec = (plan.actualEnd - 1.0).coerceAtLeast(plan.actualStart),
-                            label = "终点前第 1 帧",
+                            tSec = endFrameSec,
+                            label = "终点关键帧",
                             timeLabel = Formats.clockMs(plan.actualEnd),
                             identity = entry.sizeBytes.toString(),
                             modifier = Modifier.weight(1f),
+                            nearestKfSec = kfs.lastOrNull { it <= endFrameSec },
                         )
                     }
 
