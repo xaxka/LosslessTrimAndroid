@@ -32,6 +32,8 @@ data class AppSettings(
     val truncateOverlong: Boolean = true,
     /** 首次覆盖确认已展示过 */
     val overwriteConfirmed: Boolean = false,
+    /** 缩略图使用硬件解码（mediacodec）：快但 10-bit HEVC 颜色可能不准 */
+    val hwDecodeThumbs: Boolean = false,
 )
 
 class SettingsRepository(private val context: Context) {
@@ -44,6 +46,7 @@ class SettingsRepository(private val context: Context) {
         val OVERWRITE = booleanPreferencesKey("overwrite")
         val TRUNCATE = booleanPreferencesKey("truncate_overlong")
         val CONFIRMED = booleanPreferencesKey("overwrite_confirmed")
+        val HW_THUMBS = booleanPreferencesKey("hw_decode_thumbs")
         /** 每文件覆盖设置（含丢弃轨道）整体序列化为一个 JSON 串 */
         val OVERRIDES = stringPreferencesKey("per_file_overrides")
     }
@@ -56,6 +59,7 @@ class SettingsRepository(private val context: Context) {
             overwrite = p[Keys.OVERWRITE] ?: true,
             truncateOverlong = p[Keys.TRUNCATE] ?: true,
             overwriteConfirmed = p[Keys.CONFIRMED] ?: false,
+            hwDecodeThumbs = p[Keys.HW_THUMBS] ?: false,
         )
     }
 
@@ -84,6 +88,7 @@ class SettingsRepository(private val context: Context) {
                 overwrite = p[Keys.OVERWRITE] ?: true,
                 truncateOverlong = p[Keys.TRUNCATE] ?: true,
                 overwriteConfirmed = p[Keys.CONFIRMED] ?: false,
+                hwDecodeThumbs = p[Keys.HW_THUMBS] ?: false,
             )
             val next = transform(cur)
             p[Keys.MODE] = next.mode.ordinal
@@ -92,6 +97,7 @@ class SettingsRepository(private val context: Context) {
             p[Keys.OVERWRITE] = next.overwrite
             p[Keys.TRUNCATE] = next.truncateOverlong
             p[Keys.CONFIRMED] = next.overwriteConfirmed
+            p[Keys.HW_THUMBS] = next.hwDecodeThumbs
         }
     }
 }

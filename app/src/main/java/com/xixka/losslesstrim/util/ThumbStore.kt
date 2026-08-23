@@ -37,6 +37,16 @@ import java.util.Locale
 object ThumbStore {
 
     /**
+     * 硬解总开关（设置页"缩略图硬解"，AppViewModel 观察 settings 同步写入）。
+     * 默认 false = 软解优先：颜色可靠（10-bit HEVC → 8-bit 正确转换），
+     * 缩略图场景慢一点可接受。硬解快 5-10x 但 10-bit 输出颜色可能不可靠，
+     * 由用户自行权衡开启，**不做 isBitmapHealthy 自动检测回退**——
+     * stddev 检测会误杀极端合法画面（全单色背景/重彩动画），宁可交还选择权。
+     */
+    @Volatile
+    var hwDecodeEnabled: Boolean = false
+
+    /**
      * 抽帧并发池：列表缩略图与交互预览分池，
      * 避免进分析页时预览排在列表抽帧后面干等（预览是用户盯着等的）。
      */
@@ -403,15 +413,16 @@ object ThumbStore {
         // 修复：scale 滤镜加 out_range=pc 做 limited→full range 转换
         // 参考StackOverflow: https://stackoverflow.com/questions/74350828
         //
-        // 硬解（mediacodec）：GPU 解 HEVC 快 5-10x，输出 NV12 8-bit；
-        //   10-bit HEVC 输出元数据/颜色可能不可靠 → isBitmapHealthy 检测不健康时回退软解
-        // 软解：native hevc/x265 软解，10-bit → 8-bit 颜色正确；**不再用 -skip_frame nokey**——
-        //   它只解 I 帧，与 -ss input seek 组合时（目标点之前的 I 帧被 seek 丢弃、
-        //   目标点又是 P/B 帧被跳过）会导致 Filtergraph 无帧输出，抽帧必然失败。
-        // 回退链（预览，有最近关键帧）：hw-out-seek(kf) → hw-input-seek → sw-out-seek → sw-input-seek
-        //   硬解优先（快），不健康/失败回退软解（颜色可靠）
-        // 回退链（列表，无关键帧信息）：sw-input-seek → sw-out-seek → hw-input-seek → hw-out-seek
-        //   软解优先（起点近关键帧解码量小，颜色可靠）
+        // 软解（默认）：native hevc/x265 软解，10-bit → 8-bit 颜色正确；
+        //   **不再用 -skip_frame nokey**——它只解 I 帧，与 -ss input seek 组合时
+        //   （目标点之前的 I 帧被 seek 丢弃、目标点又是 P/B 帧被跳过）会导致
+        //   Filtergraph 无帧输出，抽帧必然失败。
+        // 硬解（设置开关）：GPU 解 HEVC 快 5-10x，但 10-bit 输出颜色可能不可靠。
+        //   用户可在设置中开启，自行权衡速度与颜色准确性。
+        // 回退链（有最近关键帧 + 硬解）：hw-out-seek → hw-input-seek → sw-out-seek → sw-input-seek
+        // 回退链（有最近关键帧 + 软解）：sw-out-seek → sw-input-seek
+        // 回退链（无关键帧 + 硬解）：hw-input-seek → hw-out-seek → sw-input-seek → sw-out-seek
+        // 回退链（无关键帧 + 软解）：sw-input-seek → sw-out-seek
 
         // --- 软件解码命令 ---
         val swCommon = "-hide_banner -loglevel info -err_detect ignore_err -threads 4"
@@ -431,20 +442,31 @@ object ThumbStore {
         val hwOutCmd = "$hwCommon -ss ${String.format(Locale.US, "%.3f", preSec)} -i \"$path\" " +
                 "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$hwVf\" -q:v 3 -y \"${outFile.absolutePath}\""
 
-        val firstCmd = if (nearestKfSec != null) hwOutCmd else swInputCmd
+        val firstCmd = if (nearestKfSec != null) swOutCmd else swInputCmd
+        val hwDecode = hwDecodeEnabled   // 设置页开关：默认软解，用户显式开启才走硬解链
         return try {
             if (nearestKfSec != null) {
-                // 预览路径：硬解优先（快 5-10x），不健康/失败回退软解（颜色可靠）
-                runFfmpegOnce(hwOutCmd, path, timeMs, outFile)
-                    ?: runFfmpegOnce(hwInputCmd, path, timeMs, outFile)
-                    ?: runFfmpegOnce(swOutCmd, path, timeMs, outFile)
-                    ?: runFfmpegOnce(swInputCmd, path, timeMs, outFile)
+                // 有最近关键帧：两阶段 seek 优先（output-seek 阶段 AVDiscard 跳非参考帧加速）
+                if (hwDecode) {
+                    runFfmpegOnce(hwOutCmd, path, timeMs, outFile)
+                        ?: runFfmpegOnce(hwInputCmd, path, timeMs, outFile)
+                        ?: runFfmpegOnce(swOutCmd, path, timeMs, outFile)
+                        ?: runFfmpegOnce(swInputCmd, path, timeMs, outFile)
+                } else {
+                    runFfmpegOnce(swOutCmd, path, timeMs, outFile)
+                        ?: runFfmpegOnce(swInputCmd, path, timeMs, outFile)
+                }
             } else {
-                // 列表缩略图：软解优先（起点近关键帧，解码量小，颜色可靠）
-                runFfmpegOnce(swInputCmd, path, timeMs, outFile)
-                    ?: runFfmpegOnce(swOutCmd, path, timeMs, outFile)
-                    ?: runFfmpegOnce(hwInputCmd, path, timeMs, outFile)
-                    ?: runFfmpegOnce(hwOutCmd, path, timeMs, outFile)
+                // 无关键帧信息：input-seek 优先
+                if (hwDecode) {
+                    runFfmpegOnce(hwInputCmd, path, timeMs, outFile)
+                        ?: runFfmpegOnce(hwOutCmd, path, timeMs, outFile)
+                        ?: runFfmpegOnce(swInputCmd, path, timeMs, outFile)
+                        ?: runFfmpegOnce(swOutCmd, path, timeMs, outFile)
+                } else {
+                    runFfmpegOnce(swInputCmd, path, timeMs, outFile)
+                        ?: runFfmpegOnce(swOutCmd, path, timeMs, outFile)
+                }
             }
         } catch (e: Exception) {
             recordFailure(FailureRecord(
@@ -461,7 +483,7 @@ object ThumbStore {
         }
     }
 
-    /** 单次 ffmpeg 抽帧执行；失败/不健康都返回 null 让 caller 决定是否 fallback */
+    /** 单次 ffmpeg 抽帧执行；失败（rc 非成功/输出为空）返回 null 让 caller 沿回退链继续。不做健康检测——是否用硬解交由设置开关决定 */
     private fun runFfmpegOnce(cmd: String, path: String, timeMs: Long, outFile: File): Bitmap? {
         val session = try {
             FFmpegKit.execute(cmd)
@@ -485,23 +507,7 @@ object ThumbStore {
         try {
             return if (rc != null && rc.isValueSuccess && outFile.exists() && outFile.length() > 0) {
                 val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
-                val bmp = BitmapFactory.decodeFile(outFile.absolutePath, opts)
-                if (bmp != null && isBitmapHealthy(bmp)) bmp else {
-                    // ffmpeg "成功"但 Bitmap 不健康——典型硬解(mediacodec)输出颜色错误/元数据丢失
-                    recordFailure(FailureRecord(
-                        at = System.currentTimeMillis(),
-                        path = path,
-                        fileSize = File(path).length(),
-                        timeMs = timeMs,
-                        cmd = cmd,
-                        returnCode = rc?.value,
-                        stderr = "rc=success but isBitmapHealthy rejected (stddev<3 or stddev>95). " +
-                                "outfile=${outFile.length()}B. Logs:\n$logs",
-                        via = "ffmpeg",
-                    ))
-                    bmp?.recycle()
-                    null
-                }
+                BitmapFactory.decodeFile(outFile.absolutePath, opts)
             } else {
                 // rc 非 success 或输出文件为空：典型 input-seek 在 EOF 附近跳过范围 / 解码失败
                 recordFailure(FailureRecord(

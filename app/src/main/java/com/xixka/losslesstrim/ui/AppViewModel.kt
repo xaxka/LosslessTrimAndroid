@@ -20,6 +20,7 @@ import com.xixka.losslesstrim.trim.TrimJob
 import com.xixka.losslesstrim.trim.TrimPlanner
 import com.xixka.losslesstrim.data.TrimPlan
 import com.xixka.losslesstrim.util.Formats
+import com.xixka.losslesstrim.util.ThumbStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -91,6 +92,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val clearingCache = _clearingCache.asStateFlow()
 
     init {
+        // 缩略图硬解开关同步到 ThumbStore（thumb() 调用点分散在 Composable，全局 volatile 开关最省侵入）
+        viewModelScope.launch {
+            settings.collect { ThumbStore.hwDecodeEnabled = it.hwDecodeThumbs }
+        }
         // 恢复持久化的每文件覆盖设置（片头/片尾/区间/丢弃轨道）：只读一次，
         // 后续以内存态为准并主动落盘，避免落盘回显与本地修改互相覆盖
         viewModelScope.launch {

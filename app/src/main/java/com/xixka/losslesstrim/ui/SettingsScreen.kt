@@ -122,6 +122,18 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
                 )
             }
 
+            GroupLabel("预览")
+            SectionCard(title = null) {
+                SwitchRow(
+                    title = "缩略图硬解（实验）",
+                    subtitle = if (settings.hwDecodeThumbs)
+                        "GPU 硬解（mediacodec）抽帧，快 5-10 倍；10-bit HEVC 颜色可能不准"
+                    else "软解抽帧，颜色准确（默认）；切换后仅影响新抽的帧，已缓存的图不变",
+                    checked = settings.hwDecodeThumbs,
+                    onChange = { v -> vm.updateSettings { it.copy(hwDecodeThumbs = v) } },
+                )
+            }
+
             GroupLabel("维护")
             CacheSection(vm)
         }
