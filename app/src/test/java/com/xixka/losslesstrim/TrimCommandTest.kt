@@ -356,7 +356,7 @@ class TrimCommandTest {
     @Test
     fun `assemble mp4 input skips fudge and mp4 output uses faststart`() {
         // mp4 输入设 AVFMT_SEEK_TO_PTS，无 B帧前移 → ss=30.000 原值；
-        // mp4 输出：无附件 map、追加 faststart；kept 无字幕 → 无 bsf
+        // mp4 输出：无附件 map、追加 faststart；probe 无字幕 → 追加 -map 0:s? 兜底、无 bsf
         val plan = TrimPlan(
             ok = true, requestedStart = 30.0, requestedEnd = 60.0,
             actualStart = 30.0, actualEnd = 60.0,
@@ -378,7 +378,7 @@ class TrimCommandTest {
         )
         assertEquals(
             "-hide_banner -y -ss 30.000 -noaccurate_seek -i \"/in.mp4\" -t 30.000 " +
-                "-map 0:0 -map 0:1 -c copy -map_metadata 0 -map_chapters 0 " +
+                "-map 0:0 -map 0:1 -map 0:s? -c copy -map_metadata 0 -map_chapters 0 " +
                 "-avoid_negative_ts make_zero " +
                 "-disposition:a:0 default -movflags +faststart -f mp4 \"/out.mp4\"",
             cmd,
@@ -400,5 +400,29 @@ class TrimCommandTest {
         assertTrue(cmd.contains(" -ss 30.154 "))
         assertTrue(cmd.contains(" -avoid_negative_ts make_zero"))
         assertTrue(cmd.contains(" -disposition:a:0 default"))
+    }
+
+    @Test
+    fun `assemble platform fallback maps subtitles when probe missed them`() {
+        // 平台兜底 MediaExtractor 对 MKV 内嵌 ASS/PGS 等不暴露 track →
+        // probe.streams 无字幕 → 追加 -map 0:s? 兜底带出（? = 无字幕不报错）
+        val plan = TrimPlan(
+            ok = true, requestedStart = 30.0, requestedEnd = 60.0,
+            actualStart = 30.0, actualEnd = 60.0,
+        )
+        val noSubProbe = ProbeResult(
+            probeOk = true, durationSec = 60.0, formatName = "matroska",
+            streams = listOf(stream(0, "video"), stream(1, "audio")),
+        )
+        val cmd = TrimService.assembleCommand(
+            "/in.mkv", "/out.mkv", plan, listOf(0, 1), mkvTarget(), noSubProbe,
+        )
+        assertTrue(cmd.contains(" -map 0:s? "))
+        // ffprobe 检测到字幕时不加 -map 0:s?（已在 bframeProbe 测试覆盖：
+        // 有字幕轨 → 显式 -map 0:2，不加 -map 0:s? 避免重复映射）
+        val cmdWithSub = TrimService.assembleCommand(
+            "/in.mkv", "/out.mkv", plan, listOf(0, 1, 2), mkvTarget(), bframeProbe(),
+        )
+        assertFalse(cmdWithSub.contains(" -map 0:s?"))
     }
 }

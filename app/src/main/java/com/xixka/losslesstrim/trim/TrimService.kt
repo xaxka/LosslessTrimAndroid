@@ -172,6 +172,17 @@ class TrimService : Service() {
         }
 
         /**
+         * 字幕轨兜底：probe 未检测到字幕流时追加 -map 0:s? 带出所有字幕轨。
+         *
+         * 根因：平台兜底 MediaExtractor 对 MKV 内嵌 ASS/PGS 等字幕不暴露 track，
+         * probe.streams 里没有 → kept 里没有 → -map 0:index 不会带 → 字幕静默丢失。
+         * ffprobe 严格路径检测到字幕时已在 kept 里显式 -map，不重复加避免冲突。
+         * `?`=无字幕时不报错（与 -map 0:t? 附件轨同款约定）。
+         */
+        fun subtitleFallbackArgs(probe: ProbeResult): String =
+            if (probe.streams.none { it.isSubtitle }) " -map 0:s?" else ""
+
+        /**
          * MKV 输出保留附件轨（`-map 0:t?`，`?`=无附件时不报错）：ASS 字幕的
          * 字体、封面等挂在 attachment 流上，不显式 map 会整轨丢失——ASS 特效
          * 字幕没字体时排版/字体全毁，用户感知"字幕剪坏了"。
@@ -273,6 +284,7 @@ class TrimService : Service() {
             sb.append(" -i \"").append(inParam).append("\"")
             sb.append(" -t ").append(Formats.secs3(dur))
             for (i in kept) sb.append(" -map 0:").append(i)
+            sb.append(subtitleFallbackArgs(probe))
             sb.append(attachmentArgs(target))
             sb.append(" -c copy -map_metadata 0 -map_chapters 0")
             sb.append(avoidNegativeTsArgs(ss))
