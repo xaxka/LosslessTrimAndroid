@@ -262,10 +262,10 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
 
                 if (plan.ok) {
                     // ---------- 切点抽帧（合并进时间轴卡片，缩略图占满宽） ----------
-                    // 无损切割切在关键帧上 → 预览就看关键帧本身：
-                    // actualStart/actualEnd 经关键帧对齐后均在 kfs 中，
-                    // nearestKfSec = 自身 → 两阶段 seek outDelta=0 → 零解码瞬间出图
-                    val endFrameSec = plan.actualEnd
+                    // 起点预览：actualStart 是关键帧（新起点第一帧）→ 零解码瞬间出图
+                    // 终点预览：actualEnd 是被剪掉的关键帧（丢弃的第一帧）→
+                    //   看它前一帧 = 最后保留帧（actualEnd - 0.05，约 1 帧）
+                    val endFrameSec = (plan.actualEnd - 0.05).coerceAtLeast(plan.actualStart)
                     val dS = plan.actualStart - plan.requestedStart
                     val dE = plan.actualEnd - plan.requestedEnd
                     val startOnStep: (Int) -> Unit = if (settings.mode == TrimMode.HEAD_TAIL)
@@ -280,7 +280,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                         FramePreview(
                             uri = entry.docUri,
                             tSec = plan.actualStart,
-                            label = "起点关键帧",
+                            label = "新起点",
                             timeLabel = "${Formats.clockMs(plan.actualStart)}(${if (dS >= 0) "+" else ""}${String.format(Locale.US, "%.1f", dS)}s)",
                             identity = entry.sizeBytes.toString(),
                             modifier = Modifier.weight(1f),
@@ -290,7 +290,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                         FramePreview(
                             uri = entry.docUri,
                             tSec = endFrameSec,
-                            label = "终点关键帧",
+                            label = "新终点",
                             timeLabel = "${Formats.clockMs(plan.actualEnd)}(${if (dE >= 0) "+" else ""}${String.format(Locale.US, "%.1f", dE)}s)",
                             identity = entry.sizeBytes.toString(),
                             modifier = Modifier.weight(1f),
