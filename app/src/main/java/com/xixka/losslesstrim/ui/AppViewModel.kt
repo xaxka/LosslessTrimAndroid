@@ -20,6 +20,7 @@ import com.xixka.losslesstrim.trim.TrimJob
 import com.xixka.losslesstrim.trim.TrimPlanner
 import com.xixka.losslesstrim.data.TrimPlan
 import com.xixka.losslesstrim.util.Formats
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -32,6 +33,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** 列表条目 + 当前参数下的处理计划 */
 data class EntryStatus(
@@ -71,6 +73,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val overrides = _overrides.asStateFlow()
 
     private var scanJob: Job? = null
+
+    // ---------------- 缓存管理（设置页"清除缓存"用） ----------------
+
+    /** 缓存概览：磁盘字节数 + 缩略图文件数 + Room 缓存行数 + 上次清除时间 */
+    data class CacheInfo(
+        val diskBytes: Long = 0L,
+        val thumbFiles: Int = 0,
+        val roomRows: Int = 0,
+        val lastClearedAt: Long? = null,
+    )
+
+    private val _cacheInfo = MutableStateFlow(CacheInfo())
+    val cacheInfo = _cacheInfo.asStateFlow()
+
+    private val _clearingCache = MutableStateFlow(false)
+    val clearingCache = _clearingCache.asStateFlow()
 
     init {
         // 恢复持久化的每文件覆盖设置（片头/片尾/区间/丢弃轨道）：只读一次，
@@ -352,4 +370,101 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun lastResults(): List<FileResult> = TrimController.lastResults.value
+
+    // ---------------- 缓存管理 ----------------
+
+    /**
+     * 刷新缓存概览（设置页进入时调用）：扫 thumbs/ + ffmpeg-thumb/ 计字节数，
+     * 查 ProbeStore Room 行数。先返回上次 lastClearedAt（如有）防止 UI 闪空。
+     */
+    fun refreshCacheInfo() {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val lastCleared = _cacheInfo.value.lastClearedAt
+            // 磁盘缓存：thumbs/ + ffmpeg-thumb/ 两目录下全部文件 size 累加
+            var bytes = 0L
+            var files = 0
+            listOf("thumbs", "ffmpeg-thumb").forEach { name ->
+                val dir = java.io.File(app.cacheDir, name)
+                if (dir.isDirectory) {
+                    dir.listFiles()?.forEach { f ->
+                        if (f.isFile) {
+                            bytes += f.length()
+                            files++
+                        }
+                    }
+                }
+            }
+            // Room 三表行数和（可能返回 0：表为空或读失败，UI 仍可显示）
+            val rows = com.xixka.losslesstrim.data.ProbeStore.totalRows(app)
+            _cacheInfo.value = CacheInfo(
+                diskBytes = bytes,
+                thumbFiles = files,
+                roomRows = rows,
+                lastClearedAt = lastCleared,
+            )
+        }
+    }
+
+    /**
+     * 清除缓存（设置页按钮）：组合清 ThumbStore 内存+磁盘+失败哨兵、
+     * ProbeStore L2 Room 三表、Probe 进程内 L1 keyframe cache、Scanner
+     * 进程内 L1 probe cache——修复前的花屏 JPEG 会被删掉，下次进入页面
+     * 重新抽帧/探测。重入保护：clearing 期间忽略重复点击。
+     */
+    fun clearCache() {
+        if (_clearingCache.value) return
+        viewModelScope.launch {
+            _clearingCache.value = true
+            try {
+                val app = getApplication<Application>()
+                // 1. ThumbStore: 内存 LruCache + 磁盘 thumbs/ffmpeg-thumb + failed 哨兵
+                com.xixka.losslesstrim.util.ThumbStore.clearAll(app)
+                // 2. ProbeStore: L2 Room（probe/keyframe/near 三表）
+                com.xixka.losslesstrim.data.ProbeStore.clearAll(app)
+                // 3. Probe.clearKeyframeCache: 进程内 L1 keyframe cache（全量+邻域）
+                com.xixka.losslesstrim.ffmpeg.Probe.clearKeyframeCache()
+                // 4. Scanner.clearProbeCache: 进程内 L1 probe cache
+                Scanner.clearProbeCache()
+                val now = System.currentTimeMillis()
+                _cacheInfo.value = CacheInfo(
+                    diskBytes = 0L,
+                    thumbFiles = 0,
+                    roomRows = 0,
+                    lastClearedAt = now,
+                )
+            } finally {
+                _clearingCache.value = false
+            }
+        }
+    }
+
+    /** 最近导出诊断的文件路径（用于在 UI 上显示让用户去找） */
+    private val _diagPath = MutableStateFlow<String?>(null)
+    val diagPath = _diagPath.asStateFlow()
+
+    private val _exportingDiag = MutableStateFlow(false)
+    val exportingDiag = _exportingDiag.asStateFlow()
+
+    /**
+     * 导出诊断日志到 Movies/LosslessTrim/thumbstore_diag_<ts>.txt。包含设备信息、
+     * ffmpeg-kit 版本、最近 N 次抽帧失败的命令/returnCode/stderr/源文件路径。
+     * 用户分享后可用于诊断花屏/卡加载中根因。导出文件路径会在 UI 显示。
+     */
+    fun exportDiagnostics() {
+        if (_exportingDiag.value) return
+        viewModelScope.launch {
+            _exportingDiag.value = true
+            try {
+                val app = getApplication<Application>()
+                val file = withContext(Dispatchers.IO) {
+                    com.xixka.losslesstrim.util.ThumbStore.exportDiagnostics(app)
+                }
+                _diagPath.value = file?.absolutePath
+                    ?: "导出失败（写入失败，可能未授予\"所有文件\"权限）"
+            } finally {
+                _exportingDiag.value = false
+            }
+        }
+    }
 }

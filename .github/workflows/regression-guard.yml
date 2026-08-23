@@ -1,12 +1,11 @@
-# 永久时间轴回归守卫：防剪辑命令/时间轴修复被回退。
-# 两道防线：
+# 回归守卫（缩略图抽帧 + 时间轴合并）
+# 防 ThumbStore.kt 抽帧修复（软解优先 + 去 skip_frame nokey）与
+# 剪辑命令/时间轴修复被回退。两道防线：
 #   1. 单测（TrimCommandTest 等）直接断言 app 生成的命令参数形态——改坏
 #      TrimService.buildCommand 即红；
-#   2. E2E 矩阵 T1–T9（scripts/verify-timeline.sh，自包含）：用真实 ffmpeg
-#      验证各命令形态的实际输出时间轴/轨道保真——错误参数即使编译通过、
-#      "看起来能跑"也会在这里现形。
-# 触发：main 的每次 push + 所有 PR + 手动。docs/output-timeline.md 为规范源。
-name: Timeline regression guard
+#   2. E2E 矩阵：用真实 ffmpeg 验证抽帧成功 + 颜色健康 + 时间轴/轨道保真。
+# 触发：main 的每次 push + 所有 PR + 手动。
+name: Regression guard
 
 on:
   push:
@@ -38,6 +37,9 @@ jobs:
 
       - name: Install ffmpeg
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - name: Thumbnail frame-extract matrix
+        run: bash scripts/verify-thumb.sh
 
       - name: E2E timeline matrix (T1-T9)
         run: bash scripts/verify-timeline.sh

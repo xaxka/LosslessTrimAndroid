@@ -166,4 +166,18 @@ object Scanner {
         }
         return probe
     }
+
+    /**
+     * 清空进程内 L1 探测缓存（设置页"清除缓存"调用）。配合 ProbeStore.clearAll
+     * （L2 Room）+ Probe.clearKeyframeCache + ThumbStore.clearAll 一起清。
+     * 下次扫描重新探测入库。
+     */
+    fun clearProbeCache() {
+        probeCache.clear()
+    }
+
+    /**
+     * 缓存大小估算（设置页展示用）：L1 条目数（仅成功结果入缓，不含失败项）。
+     */
+    fun probeCacheSize(): Int = probeCache.size
 }

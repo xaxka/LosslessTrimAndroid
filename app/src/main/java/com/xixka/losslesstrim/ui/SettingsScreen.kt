@@ -16,7 +16,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
@@ -24,7 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -32,17 +31,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import com.xixka.losslesstrim.data.AlignStrategy
 import com.xixka.losslesstrim.data.OutputContainer
-import com.xixka.losslesstrim.update.Updater
 import com.xixka.losslesstrim.ui.theme.BlSurfaceVariant
-import com.xixka.losslesstrim.ui.theme.BlChipShape
 import com.xixka.losslesstrim.ui.theme.BlExt
 import com.xixka.losslesstrim.util.Formats
 
@@ -51,6 +44,8 @@ import com.xixka.losslesstrim.util.Formats
 @Composable
 fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
     val settings by vm.settings.collectAsState()
+    // 进入设置页时刷新缓存概览（估算 thumbs/ffmpeg-thumb/ 字节数 + Room 行数）
+    LaunchedEffect(Unit) { vm.refreshCacheInfo() }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -127,8 +122,8 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
                 )
             }
 
-            GroupLabel("更新")
-            UpdateSection()
+            GroupLabel("维护")
+            CacheSection(vm)
         }
     }
 }
@@ -144,156 +139,74 @@ private fun GroupLabel(text: String) {
 }
 
 /**
- * 检查更新卡片：当前版本 + 检查按钮，按 Updater 状态机展示
- * 新版本信息 / 下载进度 / 安装入口 / 错误提示。
+ * 清除缓存卡片：展示当前磁盘缓存占用（缩略图 JPEG + Probe Room 缓存估算），
+ * 点击"清除缓存"清空 ThumbStore 内存 LruCache + 磁盘 thumbs/ffmpeg-thumb 临时目录 +
+ * ProbeStore Room 缓存（probe/keyframe/near 三表） + Probe 进程内 keyframeCache，
+ * 下次进入页面重新抽帧/探测。修复前的花屏画面在清缓存后会被删除重新抽。
+ *
+ * 不清 app/data 目录与 MediaStore（这些不属"缓存"语义）。
  */
 @Composable
-private fun UpdateSection() {
+private fun CacheSection(vm: AppViewModel) {
     val context = LocalContext.current
-    val updState by Updater.state.collectAsState()
-    // remember 返回普通值而非 State，不能用作 by 委托
-    val current = remember { Updater.currentVersion(context) }
-
-    // "允许安装未知应用"授权状态：从系统授权页返回（ON_RESUME）时刷新
-    var installAllowed by remember { mutableStateOf(Updater.canInstall(context)) }
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) installAllowed = Updater.canInstall(context)
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
+    val cacheInfo by vm.cacheInfo.collectAsState()
+    val clearing by vm.clearingCache.collectAsState()
+    val diagPath by vm.diagPath.collectAsState()
+    val exporting by vm.exportingDiag.collectAsState()
 
     SectionCard(title = null) {
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column {
-                Text("当前版本", style = MaterialTheme.typography.bodyMedium, color = BlExt.textSecondary)
-                Text(
-                    "v${current.first}（${current.second}）",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.secondary,
-                )
-            }
-            BlOutlinedButton(
-                onClick = { Updater.check(context) },
-                enabled = updState !is Updater.State.Checking && updState !is Updater.State.Downloading,
-            ) { Text("检查更新") }
+        Text(
+            "磁盘缓存 ${Formats.size(cacheInfo.diskBytes)}（缩略图 ${cacheInfo.thumbFiles} 张" +
+                    "${if (cacheInfo.roomRows > 0) " · 探测缓存 ${cacheInfo.roomRows} 行" else ""}）",
+            style = MaterialTheme.typography.bodyMedium,
+            color = BlExt.textPrimary,
+        )
+        Text(
+            "包含切点抽帧缩略图、媒体探测与关键帧缓存。清除后下次进入页面重新抽帧/探测" +
+                    "（修复前的花屏画面会被删掉重新抽）。",
+            style = MaterialTheme.typography.labelSmall,
+            color = BlExt.textSecondary,
+        )
+        BlOutlinedButton(
+            onClick = { vm.clearCache() },
+            enabled = !clearing && (cacheInfo.diskBytes > 0 || cacheInfo.roomRows > 0),
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(if (clearing) "清除中…" else "清除缓存") }
+
+        cacheInfo.lastClearedAt?.let { ts ->
+            Text(
+                "上次清除 ${Formats.timeAgo(ts)}",
+                style = MaterialTheme.typography.labelSmall,
+                color = BlExt.textSecondary,
+            )
         }
 
-        when (val s = updState) {
-            Updater.State.Idle -> Text(
-                "检查 GitHub Releases 上的最新发布版本",
-                style = MaterialTheme.typography.labelSmall,
-                color = BlExt.textSecondary,
-            )
+        androidx.compose.material3.HorizontalDivider(
+            modifier = Modifier.padding(vertical = 4.dp),
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+        )
 
-            Updater.State.Checking -> Text(
-                "正在检查更新…",
-                style = MaterialTheme.typography.labelSmall,
-                color = BlExt.textSecondary,
-            )
+        Text(
+            "诊断日志记录 ffmpeg 抽帧失败现场：命令、returnCode、stderr、源文件路径。",
+            style = MaterialTheme.typography.labelSmall,
+            color = BlExt.textSecondary,
+        )
+        BlOutlinedButton(
+            onClick = { vm.exportDiagnostics() },
+            enabled = !exporting,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(if (exporting) "导出中…" else "导出诊断日志") }
 
-            Updater.State.UpToDate -> Text(
-                "已是最新版本",
+        diagPath?.let { p ->
+            Text(
+                "已导出：$p",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.secondary,
             )
-
-            is Updater.State.Available -> {
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                Text(
-                    "发现新版本 v${s.info.versionName}",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.secondary,
-                )
-                Text(
-                    "更新包 ${Formats.size(s.info.apkSize)}，下载自 GitHub Releases",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = BlExt.textSecondary,
-                )
-                BlOutlinedButton(
-                    onClick = { Updater.download(context) },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("下载更新包") }
-            }
-
-            is Updater.State.Downloading -> {
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                val pct = if (s.total > 0) (s.received.toFloat() / s.total).coerceIn(0f, 1f) else null
-                LinearProgressIndicator(
-                    progress = { pct ?: 0f },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(4.dp)
-                        .clip(MaterialTheme.shapes.extraSmall),
-                    color = MaterialTheme.colorScheme.primary,
-                    trackColor = BlSurfaceVariant,
-                )
-                Text(
-                    if (pct != null) {
-                        "下载中 ${Formats.size(s.received)} / ${Formats.size(s.total)}（${(pct * 100).toInt()}%）"
-                    } else {
-                        "下载中 ${Formats.size(s.received)}"
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = BlExt.textSecondary,
-                )
-                BlOutlinedButton(
-                    onClick = { Updater.cancelDownload() },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("取消下载") }
-            }
-
-            is Updater.State.ReadyToInstall -> {
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                Text(
-                    "v${s.info.versionName} 更新包已就绪",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.secondary,
-                )
-                if (!installAllowed) {
-                    Text(
-                        "首次安装需允许本应用安装未知应用：点\"安装\"会跳转系统授权页，允许后返回再点一次安装",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = BlExt.textSecondary,
-                    )
-                }
-                BlOutlinedButton(
-                    onClick = {
-                        if (Updater.canInstall(context)) Updater.install(context)
-                        else Updater.requestInstallPermission(context)
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("安装") }
-            }
-
-            Updater.State.Installing -> {
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                Text(
-                    "已提交安装，请在系统弹出的确认页完成安装…",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.secondary,
-                )
-                Text(
-                    "若确认页未自动弹出，可稍候重试或从系统通知中查看安装请求",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = BlExt.textSecondary,
-                )
-                BlOutlinedButton(
-                    onClick = { Updater.retryInstall() },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("重新安装") }
-            }
-
-            is Updater.State.Error -> Text(
-                s.message,
+            Text(
+                "用文件管理器进 Movies/LosslessTrim/ 找到 .txt 分享给我",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.error,
+                color = BlExt.textSecondary,
             )
         }
     }

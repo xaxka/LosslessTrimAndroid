@@ -450,6 +450,18 @@ class TrimService : Service() {
             return FileResult(entry, logical, Outcome.SKIPPED, entry.sizeBytes, reason = logical.skipReason)
         }
 
+        // 1b. 容器解析受限：ffprobe 严格失败 + platform 兜底拿到时长但拿不到
+        //     stream 列表（典型：moov atom not found / 私有 codec_tag 异常）—
+        //     列表页能识别（看到时长+大小），但剪辑侧没法逐轨 -map，提前判
+        //     失败并给个比"未保留任何轨道"更准的提示（用户可去桌面 ffmpeg
+        //     重新 mux 后再来）
+        if (entry.probe.streams.isEmpty()) {
+            return FileResult(
+                entry, logical, Outcome.FAILED, entry.sizeBytes,
+                reason = "容器解析受限（${entry.probe.error ?: "ffprobe 失败"}），可尝试桌面 ffmpeg 重新封装后再处理",
+            )
+        }
+
         // 2. 关键帧对齐：只对"真要切"的文件探测，且只读切点邻域（-read_intervals
         //    定点读几 MB）而非整文件全量扫描（GB 级 4K 片源每次整读数十秒，是
         //    "每处理完一个文件干等半天"的主因）。全片保留的文件对齐无意义，

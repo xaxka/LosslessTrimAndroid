@@ -92,8 +92,13 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
-    // ffmpeg-kit 社区维护版 fork（ffmpeg-kit 官方已归档），仅含 demux/mux + stream copy 所需
-    implementation("com.antonkarpenko:ffmpeg-kit-min:2.2.2")
+    // ffmpeg-kit 社区维护版 fork（ffmpeg-kit 官方已归档）。切到 full 包：
+    // min 包只含 demux/mux + stream copy，**不含 HEVC/H.264 软解码器**——抽
+    // 帧时（-frames:v 1）触发解码但 fallback 解码器在 HEVC + B 帧 + 不
+    // 标准 MP4 上系统性花屏（粉红条带 / 绿红紫混合）；full 包内置
+    // x264/x265/dav1d 等完整软解码器，独立 I 帧可解无参考需求，必然稳定。
+    // APK 体积约 +60MB（full vs min 的 native lib 差），个人自用工具可接受。
+    implementation("com.antonkarpenko:ffmpeg-kit-full:2.2.1")
 
     // Room：探测结果/关键帧持久缓存（进程重启后免重扫，详见 data/CacheDb.kt）
     implementation("androidx.room:room-runtime:2.6.1")

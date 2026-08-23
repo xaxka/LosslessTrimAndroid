@@ -299,7 +299,11 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                         )
                         FramePreview(
                             uri = entry.docUri,
-                            tSec = (plan.actualEnd - 0.2).coerceAtLeast(plan.actualStart),
+                            // 终点抽帧：actualEnd - 1.0（不是 - 0.2）。actualEnd 经关键帧
+                            // 对齐后通常 = dur（最后关键帧），actualEnd - 0.2 落在 EOF 边界
+                            // 附近，ffmpeg input-seek 跳过 EOF 找不到关键帧 → 不输出文件
+                            // → 诊断日志看到 rc=0 outfile_exists=false（用户实测复现）
+                            tSec = (plan.actualEnd - 1.0).coerceAtLeast(plan.actualStart),
                             label = "终点前第 1 帧",
                             timeLabel = Formats.clockMs(plan.actualEnd),
                             identity = entry.sizeBytes.toString(),

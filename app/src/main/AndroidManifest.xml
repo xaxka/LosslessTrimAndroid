@@ -5,9 +5,6 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-    <!-- 应用内检查更新：访问 GitHub API / 下载 APK；拉起安装器装下载好的更新包 -->
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- 直接文件路径读写（优先管线）：SAF(saf: 协议)只写描述符上 -movflags +faststart
          收尾回移数据不可靠，部分设备产出缺 moov 的坏 MP4。授予"所有文件"权限后
          ffmpeg 走普通文件 I/O，彻底规避。未授予时自动退回 SAF 流程（功能不失效）。 -->
@@ -44,17 +41,6 @@
             android:name=".trim.TrimService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
-
-        <!-- 应用内更新：把下载到私有目录的 APK 以 content:// 授权给系统安装器 -->
-        <provider
-            android:name="androidx.core.content.FileProvider"
-            android:authorities="${applicationId}.fileprovider"
-            android:exported="false"
-            android:grantUriPermissions="true">
-            <meta-data
-                android:name="android.support.FILE_PROVIDER_PATHS"
-                android:resource="@xml/file_paths" />
-        </provider>
     </application>
 
 </manifest>

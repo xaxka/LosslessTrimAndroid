@@ -97,4 +97,22 @@ object Formats {
     }
 
     fun secs3(v: Double): String = String.format(Locale.US, "%.3f", v)
+
+    /**
+     * 时间戳（毫秒）→ 相对当前时间的"3 分钟前 / 1 小时前 / 2 天前"等。
+     * 1 分钟内统一显示"刚刚"。负值/0 视为未知返回"—"。
+     */
+    fun timeAgo(timestampMs: Long): String {
+        if (timestampMs <= 0L) return "—"
+        val delta = System.currentTimeMillis() - timestampMs
+        if (delta < 0) return "刚刚"
+        val sec = delta / 1000
+        if (sec < 60) return "刚刚"
+        val min = sec / 60
+        if (min < 60) return "$min 分钟前"
+        val hour = min / 60
+        if (hour < 24) return "$hour 小时前"
+        val day = hour / 24
+        return "$day 天前"
+    }
 }
