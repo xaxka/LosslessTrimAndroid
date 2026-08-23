@@ -250,7 +250,6 @@ fun VideoThumb(
     uri: android.net.Uri,
     identity: String? = null,
     modifier: Modifier = Modifier,
-    allowHw: Boolean = true,
 ) {
     val context = LocalContext.current
     val key = remember(uri, identity) { ThumbStore.keyOf(uri, identity = identity) }
@@ -258,7 +257,7 @@ fun VideoThumb(
     LaunchedEffect(key) {
         if (bmp == null) {
             // 列表缩略图显示 96x54dp，按最高密度 ~3x 出 288px 宽小图即可
-            bmp = ThumbStore.thumb(context, key, uri, timeMs = 0L, maxPx = 288, allowHw = allowHw)
+            bmp = ThumbStore.thumb(context, key, uri, timeMs = 0L, maxPx = 288)
         }
     }
     Box(
@@ -293,7 +292,6 @@ fun FramePreview(
     modifier: Modifier = Modifier,
     nearestKfSec: Double? = null,
     onStep: ((Int) -> Unit)? = null,
-    allowHw: Boolean = true,
 ) {
     val context = LocalContext.current
     val timeMs = (tSec * 1000.0).roundToLong()
@@ -306,7 +304,7 @@ fun FramePreview(
             if (bmp == null) {
                 // 预览窗口按列宽自适应（fillMaxWidth + 16:9），最高密度出 384px 宽小图足够；
                 // preview=true 走独立并发池，不与首页列表缩略图抢位
-                bmp = ThumbStore.thumb(context, key, uri, timeMs, maxPx = 384, preview = true, nearestKfSec = nearestKfSec, allowHw = allowHw)
+                bmp = ThumbStore.thumb(context, key, uri, timeMs, maxPx = 384, preview = true, nearestKfSec = nearestKfSec)
             }
         }
     }

@@ -127,8 +127,8 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
                 SwitchRow(
                     title = "缩略图硬解（实验）",
                     subtitle = if (settings.hwDecodeThumbs)
-                        "GPU 硬解抽帧快 5-10 倍；10-bit 文件自动回软解保颜色。旧探测缓存（无像素格式）也会回软解，清缓存重扫后生效"
-                    else "软解抽帧，颜色准确（默认）",
+                        "GPU 硬解（mediacodec）抽帧，快 5-10 倍；10-bit HEVC 颜色可能不准"
+                    else "软解抽帧，颜色准确（默认）；切换后仅影响新抽的帧，已缓存的图不变",
                     checked = settings.hwDecodeThumbs,
                     onChange = { v -> vm.updateSettings { it.copy(hwDecodeThumbs = v) } },
                 )
