@@ -426,7 +426,7 @@ object ThumbStore {
         // 回退链（无关键帧 + 软解）：sw-input-seek → sw-out-seek
 
         // --- 软件解码命令 ---
-        val swCommon = "-hide_banner -loglevel info -err_detect ignore_err -threads 4"
+        val swCommon = "-hide_banner -loglevel info -err_detect ignore_err -threads 0"
         val swVf = "scale='min($maxPx,iw)':-1:in_color_matrix=auto:out_color_matrix=bt709:out_range=pc"
         val swInputCmd = "$swCommon -ss $ssStr -i \"$path\" -an -sn -frames:v 1 -vf \"$swVf\" -q:v 3 -y \"${outFile.absolutePath}\""
         // 有关键帧信息时用最近关键帧做 pre-seek（output-seek 距离最小，AVDiscard 加速），
@@ -437,7 +437,7 @@ object ThumbStore {
                 "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$swVf\" -q:v 3 -y \"${outFile.absolutePath}\""
 
         // --- 硬件解码命令 ---
-        val hwCommon = "-hide_banner -loglevel info -err_detect ignore_err -hwaccel mediacodec -threads 4"
+        val hwCommon = "-hide_banner -loglevel info -err_detect ignore_err -hwaccel mediacodec -threads 0"
         // 硬解帧的颜色元数据（range/matrix）经常丢失或标错——mediacodec copyback 的已知坑：
         // auto 拿不到标记就退化成默认值（full range / bt601），out_range=pc 拿错源转换 → 偏色。
         // 显式写死 in_range=tv + bt709（视频几乎全是 limited range + bt709）兜住最常见偏色。
