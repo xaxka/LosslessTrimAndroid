@@ -276,7 +276,14 @@ fun VideoThumb(uri: android.net.Uri, identity: String? = null, modifier: Modifie
 
 /** 切点处抽帧预览；走 ThumbStore 缓存（同一时间点不重复抽帧、只出小图，杜绝拖动时内存暴涨） */
 @Composable
-fun FramePreview(uri: android.net.Uri, tSec: Double, label: String, timeLabel: String, identity: String? = null) {
+fun FramePreview(
+    uri: android.net.Uri,
+    tSec: Double,
+    label: String,
+    timeLabel: String,
+    identity: String? = null,
+    modifier: Modifier = Modifier,
+) {
     val context = LocalContext.current
     val timeMs = (tSec * 1000.0).roundToLong()
     val key = remember(uri, timeMs, identity) { ThumbStore.keyOf(uri, timeMs, identity) }
@@ -286,16 +293,20 @@ fun FramePreview(uri: android.net.Uri, tSec: Double, label: String, timeLabel: S
             // 拖动切点时 tSec 高频变化：先挂起 200ms，跳过中间值只抽最后一帧
             delay(200)
             if (bmp == null) {
-                // 预览窗口 128x72dp，按最高密度出 384px 宽小图足够；
+                // 预览窗口按列宽自适应（fillMaxWidth + 16:9），最高密度出 384px 宽小图足够；
                 // preview=true 走独立并发池，不与首页列表缩略图抢位
                 bmp = ThumbStore.thumb(context, key, uri, timeMs, maxPx = 384, preview = true)
             }
         }
     }
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
         Box(
             modifier = Modifier
-                .size(width = 128.dp, height = 72.dp)
+                .fillMaxWidth()
+                .aspectRatio(16f / 9f)
                 .clip(MaterialTheme.shapes.medium)
                 .background(BlSurfaceVariant),
             contentAlignment = Alignment.Center,
@@ -306,7 +317,7 @@ fun FramePreview(uri: android.net.Uri, tSec: Double, label: String, timeLabel: S
                     bitmap = b.asImageBitmap(),
                     contentDescription = label,
                     contentScale = ContentScale.Crop,
-                    modifier = Modifier.size(width = 128.dp, height = 72.dp),
+                    modifier = Modifier.fillMaxSize(),
                 )
             } else {
                 Text("加载中…", color = BlExt.textDisabled, style = MaterialTheme.typography.labelSmall)
