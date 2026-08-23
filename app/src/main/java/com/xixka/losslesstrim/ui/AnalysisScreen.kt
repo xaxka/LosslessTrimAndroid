@@ -266,6 +266,8 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                     // actualStart/actualEnd 经关键帧对齐后均在 kfs 中，
                     // nearestKfSec = 自身 → 两阶段 seek outDelta=0 → 零解码瞬间出图
                     val endFrameSec = plan.actualEnd
+                    val dS = plan.actualStart - plan.requestedStart
+                    val dE = plan.actualEnd - plan.requestedEnd
                     val startOnStep: (Int) -> Unit = if (settings.mode == TrimMode.HEAD_TAIL)
                         { d -> headText = stepSeconds(Formats.parseSeconds(headText), d) }
                     else
@@ -279,7 +281,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                             uri = entry.docUri,
                             tSec = plan.actualStart,
                             label = "起点关键帧",
-                            timeLabel = Formats.clockMs(plan.actualStart),
+                            timeLabel = "${Formats.clockMs(plan.actualStart)}(${if (dS >= 0) "+" else ""}${String.format(Locale.US, "%.1f", dS)}s)",
                             identity = entry.sizeBytes.toString(),
                             modifier = Modifier.weight(1f),
                             nearestKfSec = kfs.lastOrNull { it <= plan.actualStart },
@@ -289,7 +291,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                             uri = entry.docUri,
                             tSec = endFrameSec,
                             label = "终点关键帧",
-                            timeLabel = Formats.clockMs(plan.actualEnd),
+                            timeLabel = "${Formats.clockMs(plan.actualEnd)}(${if (dE >= 0) "+" else ""}${String.format(Locale.US, "%.1f", dE)}s)",
                             identity = entry.sizeBytes.toString(),
                             modifier = Modifier.weight(1f),
                             nearestKfSec = kfs.lastOrNull { it <= endFrameSec },
@@ -297,26 +299,20 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                         )
                     }
 
-                    val dS = plan.actualStart - plan.requestedStart
-                    val dE = plan.actualEnd - plan.requestedEnd
-                    Text(
-                        buildString {
-                            if (kfs.isEmpty()) {
-                                append("无关键帧信息，切点不做对齐")
-                            } else {
-                                append("对齐 起 ")
-                                append(if (dS >= 0) "+" else "")
-                                append(String.format(Locale.US, "%.1f", dS))
-                                append("s  止 ")
-                                append(if (dE >= 0) "+" else "")
-                                append(String.format(Locale.US, "%.1f", dE))
-                                append("s")
-                            }
-                            if (plan.truncated) append("  · 终点超片长已截断")
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = BlExt.textSecondary,
-                    )
+                    // 对齐偏差已拼进 timeLabel，这里只留警告
+                    if (kfs.isEmpty() || plan.truncated) {
+                        Text(
+                            buildString {
+                                if (kfs.isEmpty()) append("无关键帧信息，切点不做对齐")
+                                if (plan.truncated) {
+                                    if (length > 0) append("  · ")
+                                    append("终点超片长已截断")
+                                }
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = BlExt.textSecondary,
+                        )
+                    }
                 } else {
                     Text(
                         "当前参数不可处理：${plan.skipReason}",
