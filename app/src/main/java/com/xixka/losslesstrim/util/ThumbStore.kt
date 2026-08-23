@@ -437,7 +437,12 @@ object ThumbStore {
 
         // --- 硬件解码命令 ---
         val hwCommon = "-hide_banner -loglevel info -err_detect ignore_err -hwaccel mediacodec -threads 4"
-        val hwVf = "scale='min($maxPx,iw)':-1:in_color_matrix=auto:out_color_matrix=bt709:out_range=pc"
+        // 硬解帧的颜色元数据（range/matrix）经常丢失或标错——mediacodec copyback 的已知坑：
+        // auto 拿不到标记就退化成默认值（full range / bt601），out_range=pc 拿错源转换 → 偏色。
+        // 显式写死 in_range=tv + bt709（视频几乎全是 limited range + bt709）兜住最常见偏色。
+        // 软解命令的 auto 不动：软解元数据完整，auto 本来就对。
+        // 注：HDR（bt2020pq）内容仍会偏色，缩略图场景可接受。
+        val hwVf = "scale='min($maxPx,iw)':-1:in_range=tv:in_color_matrix=bt709:out_color_matrix=bt709:out_range=pc"
         val hwInputCmd = "$hwCommon -ss $ssStr -i \"$path\" -an -sn -frames:v 1 -vf \"$hwVf\" -q:v 3 -y \"${outFile.absolutePath}\""
         val hwOutCmd = "$hwCommon -ss ${String.format(Locale.US, "%.3f", preSec)} -i \"$path\" " +
                 "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$hwVf\" -q:v 3 -y \"${outFile.absolutePath}\""
