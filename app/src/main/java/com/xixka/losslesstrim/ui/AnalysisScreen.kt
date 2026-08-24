@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -204,7 +205,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                         trackColor = BlSurfaceVariant,
                     )
                     Text(
-                        "关键帧探测中…（读取索引，几秒）",
+                        "关键帧探测中…（读取索引，几秒；结束后生成切点缩略图）",
                         style = MaterialTheme.typography.bodySmall,
                         color = BlExt.textSecondary,
                     )
@@ -270,34 +271,47 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                     val dE = plan.actualEnd - plan.requestedEnd
                     // 10-bit 文件硬解颜色不可靠 → 两个切点预览都不给硬解资格
                     val allowHw = entry.probe.hwThumbEligible
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        FramePreview(
-                            uri = entry.docUri,
-                            tSec = plan.actualStart,
-                            label = "新起点",
-                            timeLabel = "${Formats.clockMs(plan.actualStart)}(${if (dS >= 0) "+" else ""}${String.format(Locale.US, "%.1f", dS)}s)",
-                            identity = entry.sizeBytes.toString(),
-                            modifier = Modifier.weight(1f),
-                            nearestKfSec = kfs.lastOrNull { it <= plan.actualStart },
-                            allowHw = allowHw,
-                        )
-                        FramePreview(
-                            uri = entry.docUri,
-                            tSec = endFrameSec,
-                            label = "新终点",
-                            timeLabel = "${Formats.clockMs(plan.actualEnd)}(${if (dE >= 0) "+" else ""}${String.format(Locale.US, "%.1f", dE)}s)",
-                            identity = entry.sizeBytes.toString(),
-                            modifier = Modifier.weight(1f),
-                            nearestKfSec = kfs.lastOrNull { it <= endFrameSec },
-                            allowHw = allowHw,
-                        )
+                    if (keyframes == null) {
+                        // 先探测关键帧、探测结束再生成缩略图：
+                        // 1) 对齐前的 actual 切点还会随探测结果变化，提前抽帧必然作废重抽；
+                        // 2) 拿到关键帧后 nearestKfSec 非空，ffmpeg 走两段式 seek，抽帧更快更稳；
+                        // 3) 避免与 ffprobe 全量扫描并发抢 IO/CPU。
+                        // 探测失败（空列表）也算"结束"，此时按未对齐切点只抽一次。
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            ThumbPendingPlaceholder("新起点", Modifier.weight(1f))
+                            ThumbPendingPlaceholder("新终点", Modifier.weight(1f))
+                        }
+                    } else {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            FramePreview(
+                                uri = entry.docUri,
+                                tSec = plan.actualStart,
+                                label = "新起点",
+                                timeLabel = "${Formats.clockMs(plan.actualStart)}(${if (dS >= 0) "+" else ""}${String.format(Locale.US, "%.1f", dS)}s)",
+                                identity = entry.sizeBytes.toString(),
+                                modifier = Modifier.weight(1f),
+                                nearestKfSec = kfs.lastOrNull { it <= plan.actualStart },
+                                allowHw = allowHw,
+                            )
+                            FramePreview(
+                                uri = entry.docUri,
+                                tSec = endFrameSec,
+                                label = "新终点",
+                                timeLabel = "${Formats.clockMs(plan.actualEnd)}(${if (dE >= 0) "+" else ""}${String.format(Locale.US, "%.1f", dE)}s)",
+                                identity = entry.sizeBytes.toString(),
+                                modifier = Modifier.weight(1f),
+                                nearestKfSec = kfs.lastOrNull { it <= endFrameSec },
+                                allowHw = allowHw,
+                            )
+                        }
                     }
 
                     // 对齐偏差已拼进 timeLabel，这里只留警告
-                    if (kfs.isEmpty() || plan.truncated) {
+                    // （探测未结束时 kfs 为空只是暂态，不算"无关键帧信息"）
+                    if ((keyframes != null && kfs.isEmpty()) || plan.truncated) {
                         Text(
                             buildString {
-                                if (kfs.isEmpty()) append("无关键帧信息，切点不做对齐")
+                                if (keyframes != null && kfs.isEmpty()) append("无关键帧信息，切点不做对齐")
                                 if (plan.truncated) {
                                     if (length > 0) append("  · ")
                                     append("终点超片长已截断")
@@ -710,5 +724,28 @@ fun TimelineBar(
                 color = BlExt.textSecondary,
             )
         }
+    }
+}
+
+/**
+ * 切点缩略图占位（关键帧探测结束前）。
+ * 与 [FramePreview] 同尺寸同布局（16:9 + 标签行），探测结束后原位替换为真实抽帧，
+ * 布局不跳动；占位阶段不启动任何 ffmpeg 抽帧。
+ */
+@Composable
+private fun ThumbPendingPlaceholder(label: String, modifier: Modifier = Modifier) {
+    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(16f / 9f)
+                .clip(MaterialTheme.shapes.medium)
+                .background(BlSurfaceVariant),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("等关键帧…", color = BlExt.textDisabled, style = MaterialTheme.typography.labelSmall)
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(label, style = MaterialTheme.typography.labelSmall)
     }
 }
