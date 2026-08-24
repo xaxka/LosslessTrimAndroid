@@ -109,22 +109,29 @@ class TrimService : Service() {
         fun seekArgs(ss: Double): String =
             if (ss > 0.001) " -ss ${Formats.secs3(ss)} -noaccurate_seek" else ""
 
-        /**
-         * 输出侧时间戳归零参数；片头剪切（ss≈0，无 -ss）返回空串，即用 ffmpeg
-         * 默认的 avoid_negative_ts=auto（LosslessCut 同款门控：仅 cuttingStart &&
-         * ssBeforeInput 才传）。
+        /*
+         * 输出侧时间戳归零：**全程不传 -avoid_negative_ts**，交给 ffmpeg 默认的
+         * auto（任何剪切位置、任何输出容器一致）。
          *
-         * 实测（音频超前 0.8s 样例片头剪）：make_zero 会把首包 DTS 钉到 0，但
-         * matroska 封装下结果首包 pts=-0.023 为负（make_zero 与封装器各自的位移
-         * 打架）；auto 则干净输出 start_time=0.000。LosslessCut 注释另指出
-         * "no -ss 时传 make_zero 会让部分视频在 QuickLook 首帧黑屏"。
+         * 中段剪曾传 make_zero（认为 seek 后首包是源片中段绝对时间戳需归零——
+         * 这是误解：-ss 作输入项时 CLI 已用 ts_offset=-ss 把时间戳拉回 0 附近，
+         * make_zero 反而添乱）：它把最小 DTS 钉到 0，首帧 PTS 仍残留 B 帧重排
+         * 延迟（bf3@12.5fps 实测 start=0.160s，重排更大 → 0.2s+），mkv/mp4
+         * 双双触发“起点未归零”校验失败（线上形态：输出校验失败
+         * start=0.200s，用户成片被误判失败删除）；音频超前源还会因整体平移
+         * 把容器时长撑大（实测 5.2s 窗口写出 6.358s）。
          *
-         * 中段剪（有 -ss）保持 make_zero：seek 后首包时间戳为源片中段绝对值
-         * （如 30.0s），不显式归零成片 start_time=30s，播放器时间轴直接从
-         * 30:00 起跳。
+         * auto 模式下各封装用原生机制表达重排延迟，矩阵实测（ffmpeg 4.4 与
+         * master 双版本 × 纯视频bf3 / 音视频对齐bf8 / 音频超前0.8sbf8 三源）
+         * start_time 全为 0.000、时长准确、音频包数完整、解码零错误：
+         * - mp4/mov：edit list + 负 CTS（ctts），与相机直录的 B 帧 mp4 同构
+         *   （基线实测：直接 x264 -bf 3 编码的首包 pts=0.000/dts=-0.160/
+         *   start=0.000——负 dts 本就是 mp4 的标准形态，不是异常）；
+         * - matroska/webm：muxer 以首包为基线归零；
+         * - TS/AVI/FLV 等无负时间戳能力的封装：auto 等价“负则平移”，与
+         *   make_zero 行为一致（本管线切点恒带 fudge 负偏移，首包必负、
+         *   两者同样触发平移），无回退风险。
          */
-        fun avoidNegativeTsArgs(ss: Double): String =
-            if (ss > 0.001) " -avoid_negative_ts make_zero" else ""
 
         /**
          * 字幕包时长钳制 bsf（修复"时间轴结束还在不停播放"）：把每个字幕包的
@@ -271,9 +278,9 @@ class TrimService : Service() {
          *
          * -ss 补偿见 [seekFudgeSec]；-t 锚定在 -ss 值上（停止条件 pts ≥ ss+t），
          * 须同步减去同量，终点才能仍落在 actualEnd。片头剪切不传 -ss（见
-         * [seekArgs]）、不传 make_zero（见 [avoidNegativeTsArgs]）；字幕时长
-         * 钳制见 [subtitleClampBsf]（clampSubtitles=false 为校验失败后的降级
-         * 重跑路径）；disposition/附件/章节/muxdelay 见各函数注释。
+         * [seekArgs]）；全程不传 -avoid_negative_ts（见上方时间戳归零注释）；
+         * 字幕时长钳制见 [subtitleClampBsf]（clampSubtitles=false 为校验失败
+         * 后的降级重跑路径）；disposition/附件/章节/muxdelay 见各函数注释。
          */
         fun assembleCommand(
             inParam: String,
@@ -296,7 +303,6 @@ class TrimService : Service() {
             sb.append(subtitleFallbackArgs(probe))
             sb.append(attachmentArgs(target))
             sb.append(" -c copy -map_metadata 0 -map_chapters 0")
-            sb.append(avoidNegativeTsArgs(ss))
             if (clampSubtitles && hasKeptSubtitle(probe, kept)) {
                 sb.append(" -bsf:s ").append(subtitleClampBsf(dur))
             }

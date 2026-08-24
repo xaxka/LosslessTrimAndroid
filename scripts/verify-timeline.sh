@@ -16,6 +16,9 @@
 #     T8 TS 源：TS→MKV 归零；TS→TS 需 -muxdelay 0（默认 1.4s 偏移复现）
 #     T9 VFR 源：非均匀时间戳网格剪切归零 + 解码干净
 #     T10 B帧 seek 落点：-ss 无 fudge 复现早落一个 GOP（修复臂 = T2 落点断言）
+#     T11 B帧源中段剪起点：make_zero 残留重排延迟复现（线上形态"输出校验
+#         失败(起点未归零 start=0.200s)"）；修复=全程不传 -avoid_negative_ts
+#         （ffmpeg 默认 auto），mkv/mp4 双容器归零
 set -euo pipefail
 W="$(mktemp -d)"
 cd "$W"
@@ -117,10 +120,10 @@ echo "  dur=$DUR st=$STT v0=$V0 vend=$VEND a0=$A0 aN=$ACNT sub_end=$SEND 尾超=
 python3 -c "exit(0 if $OVER > 5 else 1)" || { echo "T1 FAIL: 超播未复现"; exit 1; }
 echo "  T1 PASS（复现确认）"
 
-echo; echo "== T2 新命令·中段剪（+字幕钳制 → 超播 <0.5s、起点≈0）:"
+echo; echo "== T2 新命令·中段剪（+字幕钳制，auto 归零 → 超播 <0.5s、起点≈0）:"
 ffmpeg -hide_banner -loglevel error -y -ss "$SS" -noaccurate_seek -i src.mkv \
   -t "$T" -map 0:0 -map 0:1 -map 0:2 -map "0:t?" -c copy -map_metadata 0 -map_chapters 0 \
-  -avoid_negative_ts make_zero -bsf:s "$CLAMP" -disposition:a:0 default -f matroska t2.mkv
+  -bsf:s "$CLAMP" -disposition:a:0 default -f matroska t2.mkv
 read -r DUR STT V0 VEND A0 ACNT SEND OVER <<< "$(measure t2.mkv)"
 echo "  dur=$DUR st=$STT v0=$V0 vend=$VEND a0=$A0 aN=$ACNT sub_end=$SEND 尾超=$OVER"
 # vend/dur 上界 = B帧 seek 精确落点断言（docs/mkv-bframe-seek-offset.md）：
@@ -205,10 +208,10 @@ ffmpeg -hide_banner -loglevel error -y -ss 2 -i twoaud.mkv -t 4 \
 T5_OLD_DEF="$(py_stream t5_old.mkv "print([s.get('disposition',{}).get('default') for s in streams if s['codec_type']=='audio'][0])")"
 echo "  旧命令输出音轨 default=$T5_OLD_DEF（复现：无默认轨）"
 [ "$T5_OLD_DEF" = "0" ] || { echo "T5 FAIL: 旧命令复现失败"; exit 1; }
-# 新命令（app 现行为）：-disposition:a:0 default
+# 新命令（app 现行为）：-disposition:a:0 default + auto 时间戳
 ffmpeg -hide_banner -loglevel error -y -ss 2 -i twoaud.mkv -t 4 \
   -map 0:0 -map 0:2 -c copy -map_metadata 0 -map_chapters 0 \
-  -avoid_negative_ts make_zero -disposition:a:0 default -f matroska t5_new.mkv
+  -disposition:a:0 default -f matroska t5_new.mkv
 T5_NEW_DEF="$(py_stream t5_new.mkv "print([s.get('disposition',{}).get('default') for s in streams if s['codec_type']=='audio'][0])")"
 echo "  新命令输出音轨 default=$T5_NEW_DEF"
 [ "$T5_NEW_DEF" = "1" ] || { echo "T5 FAIL: disposition 重设未生效"; exit 1; }
@@ -229,7 +232,7 @@ ffmpeg -hide_banner -loglevel error -y -i att.mkv -attach font.bin \
 echo; echo "== T6 附件+章节（MKV 输出，-ss 2 -t 4）:"
 ffmpeg -hide_banner -loglevel error -y -ss 2 -i attach.mkv -t 4 \
   -map 0:0 -map 0:1 -map "0:t?" -c copy -map_metadata 0 -map_chapters 0 \
-  -avoid_negative_ts make_zero -disposition:a:0 default -f matroska t6.mkv
+  -disposition:a:0 default -f matroska t6.mkv
 T6_ATT="$(py_stream t6.mkv "print(sum(1 for s in streams if s['codec_type']=='attachment'))")"
 echo "  输出附件流数=$T6_ATT"
 [ "$T6_ATT" -ge 1 ] || { echo "T6 FAIL: 附件未保留"; exit 1; }
@@ -252,10 +255,10 @@ rot_of() { ffprobe -v error -select_streams v:0 -show_entries stream_side_data=r
 echo; echo "== T7 旋转元数据（源 rotation=$(rot_of rot.mp4)）:"
 ffmpeg -hide_banner -loglevel error -y -ss 2 -i rot.mp4 -t 4 \
   -map 0:0 -c copy -map_metadata 0 -map_chapters 0 \
-  -avoid_negative_ts make_zero -f matroska t7.mkv
+  -f matroska t7.mkv
 ffmpeg -hide_banner -loglevel error -y -ss 2 -i rot.mp4 -t 4 \
   -map 0:0 -c copy -map_metadata 0 -map_chapters 0 \
-  -avoid_negative_ts make_zero -movflags +faststart -f mp4 t7.mp4
+  -movflags +faststart -f mp4 t7.mp4
 echo "  mkv rotation=$(rot_of t7.mkv) | mp4 rotation=$(rot_of t7.mp4)"
 [ "$(rot_of t7.mkv)" = "90" ] || { echo "T7 FAIL: MKV 丢失旋转"; exit 1; }
 [ "$(rot_of t7.mp4)" = "90" ] || { echo "T7 FAIL: MP4 丢失旋转"; exit 1; }
@@ -269,7 +272,7 @@ ffmpeg -hide_banner -loglevel error -y \
 echo; echo "== T8 TS 源（-ss 2 -t 4，bf=0 无 fudge）:"
 ffmpeg -hide_banner -loglevel error -y -ss 2 -noaccurate_seek -i src.ts -t 4 \
   -map 0:0 -map 0:1 -c copy -map_metadata 0 -map_chapters 0 \
-  -avoid_negative_ts make_zero -disposition:a:0 default -f matroska t8.mkv
+  -disposition:a:0 default -f matroska t8.mkv
 read -r ST8 D8 _ < <(ffprobe -v error -show_entries format=start_time,duration -of csv=p=0 t8.mkv | tr ',' ' ')
 echo "  TS→MKV: start=$ST8 dur=$D8"
 python3 -c "exit(0 if abs($ST8) < 0.1 and abs($D8 - 4.0) < 2.0 else 1)" || { echo "T8 FAIL: TS→MKV 时间轴异常"; exit 1; }
@@ -284,7 +287,7 @@ python3 -c "exit(0 if $ST8O > 1.0 else 1)" || { echo "T8 FAIL: muxdelay 偏移�
 # 修复：-muxdelay 0 -muxpreload 0 → start_time≈0
 ffmpeg -hide_banner -loglevel error -y -ss 2 -noaccurate_seek -i src.ts -t 4 \
   -map 0:0 -map 0:1 -c copy -map_metadata 0 -map_chapters 0 \
-  -avoid_negative_ts make_zero -muxdelay 0 -muxpreload 0 -f mpegts t8.ts
+  -muxdelay 0 -muxpreload 0 -f mpegts t8.ts
 read -r ST8N D8N _ < <(ffprobe -v error -show_entries format=start_time,duration -of csv=p=0 t8.ts | tr ',' ' ')
 echo "  TS→TS 加 muxdelay 0: start=$ST8N dur=$D8N"
 python3 -c "exit(0 if abs($ST8N) < 0.1 and abs($D8N - 4.0) < 2.0 else 1)" || { echo "T8 FAIL: TS→TS 时间轴异常"; exit 1; }
@@ -298,7 +301,7 @@ ffmpeg -hide_banner -loglevel error -y \
 echo; echo "== T9 VFR 源（-ss 6 -t 6）:"
 ffmpeg -hide_banner -loglevel error -y -ss 6 -noaccurate_seek -i vfr.mkv -t 6 \
   -map 0:0 -c copy -map_metadata 0 -map_chapters 0 \
-  -avoid_negative_ts make_zero -f matroska t9.mkv
+  -f matroska t9.mkv
 read -r ST9 D9 _ < <(ffprobe -v error -show_entries format=start_time,duration -of csv=p=0 t9.mkv | tr ',' ' ')
 echo "  VFR 剪切: start=$ST9 dur=$D9"
 python3 -c "exit(0 if abs($ST9) < 0.1 and abs($D9 - 6.0) < 1.0 else 1)" || { echo "T9 FAIL: VFR 时间轴异常"; exit 1; }
@@ -311,13 +314,43 @@ echo "  T9 PASS（VFR 归零、解码干净）"
 # 视频多进 ~2s（vend≈32）。修复臂即 T2（ss=KF+fudge，已含 vend<30.7 断言）。
 echo; echo "== T10 B帧 seek 落点（-ss $KF 无 fudge，应复现早落一个 GOP）:"
 ffmpeg -hide_banner -loglevel error -y -ss "$KF" -noaccurate_seek -i src.mkv \
-  -t "$T" -map 0:0 -map 0:1 -map 0:2 -c copy -map_metadata 0 -map_chapters 0 \
-  -avoid_negative_ts make_zero -bsf:s "$CLAMP" -disposition:a:0 default -f matroska t10.mkv
+  -t "$T" -map 0:0 -map 0:1 -map 0:2 -map "0:t?" -c copy -map_metadata 0 -map_chapters 0 \
+  -bsf:s "$CLAMP" -disposition:a:0 default -f matroska t10.mkv
 read -r DUR10 STT10 V010 VEND10 A010 ACNT10 SEND10 OVER10 <<< "$(measure t10.mkv)"
 echo "  dur=$DUR10 vend=$VEND10（预期 ≈32：早落一个 GOP，视频多进 ~2s）"
 python3 -c "exit(0 if $VEND10 > 31.5 and $DUR10 > 31.5 else 1)" \
   || { echo "T10 FAIL: 早落 GOP 未复现（ffmpeg 行为变化？请重估 fudge 公式）"; exit 1; }
 decode_clean t10.mkv || { echo "T10 FAIL: 解码错误"; exit 1; }
 echo "  T10 PASS（复现确认；修复臂见 T2 落点断言）"
+
+# ---- T11 B帧源中段剪起点归零（线上"输出校验失败(起点未归零 start=0.200s)"）----
+# 根因：-ss 作输入项时 CLI 已用 ts_offset=-ss 把包时间戳拉回 0 附近；中段剪
+# 传 make_zero 会把最小 DTS 钉 0，首帧 PTS 残留 B 帧重排延迟（bf3@12.5fps
+# 实测 start=0.160s；线上样例重排 0.2s → start=0.200s），超过 app 校验阈值
+# 0.1s → 好成片被误判失败。修复=全程不传 -avoid_negative_ts（ffmpeg 默认
+# auto）：mp4 用 edit list+负 CTS（与相机直录 B 帧 mp4 同构）、mkv 用首包
+# 基线，start_time=0；音频超前源还顺带修复 make_zero 把容器时长撑大的问题。
+ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=size=320x180:rate=12.5:duration=20" \
+  -c:v libx264 -preset veryfast -bf 3 -g 25 -keyint_min 25 -sc_threshold 0 bfv.mp4
+echo; echo "== T11 B帧中段剪（-ss 10 -t 5，make_zero 应复现残余起点 ≈0.160s）:"
+# 复现臂：make_zero → start_time 残留重排延迟
+ffmpeg -hide_banner -loglevel error -y -ss 10 -noaccurate_seek -i bfv.mp4 -t 5 -map 0:v -c copy \
+  -map_metadata 0 -map_chapters 0 -avoid_negative_ts make_zero -f matroska t11_old.mkv
+read -r ST11O _ < <(ffprobe -v error -show_entries format=start_time -of csv=p=0 t11_old.mkv)
+echo "  旧命令 mkv: start=$ST11O（复现残余起点）"
+python3 -c "exit(0 if $ST11O > 0.1 else 1)" || { echo "T11 FAIL: make_zero 残余起点未复现（ffmpeg 行为变化？）"; exit 1; }
+# 修复臂：auto → mkv/mp4 双容器 start_time≈0
+ffmpeg -hide_banner -loglevel error -y -ss 10 -noaccurate_seek -i bfv.mp4 -t 5 -map 0:v -c copy \
+  -map_metadata 0 -map_chapters 0 -f matroska t11.mkv
+ffmpeg -hide_banner -loglevel error -y -ss 10 -noaccurate_seek -i bfv.mp4 -t 5 -map 0:v -c copy \
+  -map_metadata 0 -map_chapters 0 -movflags +faststart+use_metadata_tags -f mp4 t11.mp4
+read -r ST11 _ < <(ffprobe -v error -show_entries format=start_time -of csv=p=0 t11.mkv)
+read -r ST11M _ < <(ffprobe -v error -show_entries format=start_time -of csv=p=0 t11.mp4)
+echo "  新命令 mkv: start=$ST11 | mp4: start=$ST11M"
+python3 -c "exit(0 if abs($ST11) < 0.05 and abs($ST11M) < 0.05 else 1)" \
+  || { echo "T11 FAIL: 起点未归零"; exit 1; }
+decode_clean t11.mkv || { echo "T11 FAIL: mkv 解码错误"; exit 1; }
+decode_clean t11.mp4 || { echo "T11 FAIL: mp4 解码错误"; exit 1; }
+echo "  T11 PASS（B帧重排源 mkv/mp4 双容器起点归零）"
 
 echo; echo "ALL PASS"

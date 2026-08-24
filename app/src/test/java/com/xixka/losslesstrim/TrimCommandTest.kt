@@ -43,18 +43,29 @@ class TrimCommandTest {
         assertEquals(" -ss 0.174 -noaccurate_seek", TrimService.seekArgs(0.174))
     }
 
-    // ---------- avoidNegativeTsArgs ----------
+    // ---------- 时间戳归零（不传 -avoid_negative_ts，防回退锚点） ----------
 
     @Test
-    fun `head cut omits make_zero letting ffmpeg default auto apply`() {
-        assertEquals("", TrimService.avoidNegativeTsArgs(0.0))
-        assertEquals("", TrimService.avoidNegativeTsArgs(0.001))
-    }
-
-    @Test
-    fun `mid cut keeps make_zero to reset absolute timestamps`() {
-        assertEquals(" -avoid_negative_ts make_zero", TrimService.avoidNegativeTsArgs(30.154))
-        assertEquals(" -avoid_negative_ts make_zero", TrimService.avoidNegativeTsArgs(0.174))
+    fun `assembled commands never pass avoid_negative_ts`() {
+        // 中段剪曾传 make_zero：B 帧重排下首帧 PTS 残留重排延迟（实测
+        // bf3@12.5fps → start=0.160s，线上即"输出校验失败(起点未归零
+        // start=0.200s)"）；改用 ffmpeg 默认 auto 后 mp4 走 edit list+负
+        // CTS、mkv 走首包基线，start_time=0。此断言防任何人把 make_zero
+        // 加回装配（TrimService 时间戳归零注释有完整实测矩阵）。
+        val plan = TrimPlan(
+            ok = true, requestedStart = 30.0, requestedEnd = 60.0,
+            actualStart = 30.0, actualEnd = 60.0,
+        )
+        val mid = TrimService.assembleCommand(
+            "/in.mkv", "/out.mkv", plan, listOf(0, 1, 2), mkvTarget(), bframeProbe(),
+        )
+        assertFalse(mid.contains("avoid_negative_ts"))
+        val head = TrimService.assembleCommand(
+            "/in.mkv", "/out.mkv",
+            plan.copy(requestedStart = 0.0, actualStart = 0.0),
+            listOf(0, 1, 2), mkvTarget(), bframeProbe(),
+        )
+        assertFalse(head.contains("avoid_negative_ts"))
     }
 
     // ---------- subtitleClampBsf ----------
@@ -338,7 +349,6 @@ class TrimCommandTest {
         assertEquals(
             "-hide_banner -y -ss 30.154 -noaccurate_seek -i \"/in.mkv\" -t 29.846 " +
                 "-map 0:0 -map 0:1 -map 0:2 -map 0:t? -c copy -map_metadata 0 -map_chapters 0 " +
-                "-avoid_negative_ts make_zero " +
                 "-bsf:s setts=duration=if(gte(DURATION\\,0)\\,max(min(DURATION\\,(29.846/TB)-TS)\\,0)\\,0) " +
                 "-disposition:a:0 default -default_mode infer_no_subs -ignore_unknown -f matroska \"/out.mkv\"",
             cmd,
@@ -346,8 +356,8 @@ class TrimCommandTest {
     }
 
     @Test
-    fun `assemble head cut omits ss and make_zero keeps clamp`() {
-        // 片头剪：无 -ss（防丢音频）、无 make_zero（防负 pts），钳制与加固项保留
+    fun `assemble head cut omits ss and keeps clamp`() {
+        // 片头剪：无 -ss（防丢音频），钳制与加固项保留
         val plan = TrimPlan(
             ok = true, requestedStart = 0.0, requestedEnd = 30.0,
             actualStart = 0.0, actualEnd = 30.0,
@@ -390,7 +400,6 @@ class TrimCommandTest {
         assertEquals(
             "-hide_banner -y -ss 30.000 -noaccurate_seek -i \"/in.mp4\" -t 30.000 " +
                 "-map 0:0 -map 0:1 -map 0:s? -c copy -map_metadata 0 -map_chapters 0 " +
-                "-avoid_negative_ts make_zero " +
                 "-disposition:a:0 default -movflags +faststart+use_metadata_tags -ignore_unknown -f mp4 \"/out.mp4\"",
             cmd,
         )
@@ -407,9 +416,10 @@ class TrimCommandTest {
             clampSubtitles = false,
         )
         assertFalse(cmd.contains(" -bsf:s "))
-        // 降级只去钳制，其余加固项（fudge/make_zero/disposition/附件）不动
+        // 降级只去钳制，其余加固项（fudge/disposition/附件）不动，
+        // avoid_negative_ts 任何形态都不出现（见"never pass"测试）
         assertTrue(cmd.contains(" -ss 30.154 "))
-        assertTrue(cmd.contains(" -avoid_negative_ts make_zero"))
+        assertFalse(cmd.contains("avoid_negative_ts"))
         assertTrue(cmd.contains(" -disposition:a:0 default"))
     }
 
