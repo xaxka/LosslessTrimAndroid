@@ -241,17 +241,17 @@ object ThumbStore {
      *
      * 关键差异（按 [preview] 走两条路径）：
      *
-     * - **切点预览（preview=true）**：必走 ffmpeg 软解，**不查 diskCache**。
-     *   原因：上一版 thumbnail 路径同时存 platform + ffmpeg 抽的图，platform 在
-     *   HEVC + B 帧 + 不标准 MP4 上系统性返回花屏（粉红条带 / 绿红紫混合等），
-     *   上一版 5 点单色检测识别不出这类花屏，坏图进 diskCache 后即使清缓存按钮
-     *   之后重抽仍可能命中旧坏图。preview 路径绕开 diskCache：每次进分析页
-     *   必走 ffmpeg 软解，绕开 platform codec 兼容性。100~200ms/张 + 拖动 200ms
-     *   防抖 = 用户感知 300~400ms 一次，可接受（花屏不能忍，慢一点可接受）。
+     * - **切点预览（preview=true）**：memCache → diskCache（读时健康校验）→
+     *   ffmpeg 软解 → platform 兜底（仅入内存）。历史版本曾让 preview 完全
+     *   绕开 diskCache（怕命中上一版 platform 抽的坏 JPEG），副作用是冷启动/
+     *   内存缓存被挤出后重进分析页，盘上明明有现成 JPEG（上次进页抽的切点图，
+     *   或列表首帧图——切点对齐到 0 时两者同 key）仍要重跑 ffmpeg 重抽一遍，
+     *   即"外面列表已经生成了新起点缩略图、时间线也没变，进来还要重新生成
+     *   一次"。现在敢读的前提见下方 preview 分支注释。
      *
-     * - **列表缩略图（preview=false）**：先 memCache → diskCache（健康检查）→
-     *   platform 主路径（快）→ 不健康则 ffmpeg 兜底。缩略图小（128x72dp），
-     *   偶发花屏对判断无影响；优先保持列表渲染流畅。
+     * - **列表缩略图（preview=false）**：memCache → diskCache（健康检查）→
+     *   ffmpeg 主路径（软解颜色正确）→ platform 兜底。缩略图小（128x72dp），
+     *   优先保持列表渲染流畅。
      */
     suspend fun thumb(
         context: Context,
@@ -267,26 +267,42 @@ object ThumbStore {
         if (isRecentlyFailed(key)) return null
         val app = context.applicationContext
         if (preview) {
-            // 切点预览：绕开 diskCache（可能命中旧 platform 花屏 JPEG），直接 ffmpeg 软解
+            // 切点预览：memCache → diskCache（读时健康校验）→ ffmpeg 软解 → platform 兜底。
+            //
+            // 2026-08-24 恢复读 diskCache：此前 preview 一律绕开磁盘（怕命中上一版
+            // platform 抽的坏 JPEG 落盘），代价是冷启动/内存缓存被挤出后重进分析页，
+            // 盘上明明有现成 JPEG（上次进页抽的切点图；或列表首帧图——actualStart
+            // 对齐到 0 时 keyOf 归一为同 key）仍要重跑 ffmpeg 重抽一遍，即"外面
+            // 列表已经生成了新起点缩略图、时间线也没变，进来还要重新生成一次"。
+            // 现在敢读的前提：
+            //  1) 抽帧主路径早已改为 ffmpeg（platform 仅兜底），列表路径一直在读
+            //     同一目录，未再出现坏图回灌问题；
+            //  2) loadFromDisk 每次读取都过 isBitmapHealthy（64 点 stddev），
+            //     旧 platform 花屏形态（全单色 stddev<3 / 条带 stddev>95）当场
+            //     拒绝并删文件，继续走 ffmpeg 重抽，最终行为与绕开磁盘时一致，
+            //     坏图不会污染预览。时间线/文件变了 key 自然 miss，照常重抽。
+            withContext(Dispatchers.IO) { loadFromDisk(app, key) }?.let { return it }
             return previewSemaphore.withPermit {
                 withContext(Dispatchers.IO) {
-                    memCache.get(key) ?: run {
-                        val ffmpegBmp = extractViaFfmpeg(app, uri, timeMs, maxPx, nearestKfSec, allowHw)
-                        if (ffmpegBmp != null) {
-                            memCache.put(key, ffmpegBmp)
-                            saveToDisk(app, key, ffmpegBmp)
-                            ffmpegBmp
-                        } else {
-                            // ffmpeg 失败（路径不可用）：platform 兜底，**只入 memCache**
-                            // 防止坏图污染 diskCache 供下次预览路径命中
-                            val platBmp = extractViaPlatform(app, uri, timeMs, maxPx)
-                            if (platBmp != null) memCache.put(key, platBmp)
-                            platBmp ?: run {
-                                markFailed(key)
-                                null
+                    memCache.get(key)
+                        ?: loadFromDisk(app, key)   // 排队期间可能已被其它协程写入
+                        ?: run {
+                            val ffmpegBmp = extractViaFfmpeg(app, uri, timeMs, maxPx, nearestKfSec, allowHw)
+                            if (ffmpegBmp != null) {
+                                memCache.put(key, ffmpegBmp)
+                                saveToDisk(app, key, ffmpegBmp)
+                                ffmpegBmp
+                            } else {
+                                // ffmpeg 失败（路径不可用）：platform 兜底，**只入 memCache**
+                                // 防止坏图污染 diskCache 供下次预览路径命中
+                                val platBmp = extractViaPlatform(app, uri, timeMs, maxPx)
+                                if (platBmp != null) memCache.put(key, platBmp)
+                                platBmp ?: run {
+                                    markFailed(key)
+                                    null
+                                }
                             }
                         }
-                    }
                 }
             }
         }
