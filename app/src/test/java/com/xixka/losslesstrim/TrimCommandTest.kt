@@ -387,12 +387,13 @@ class TrimCommandTest {
 
     @Test
     fun `seek failure head landing is skipped not failed`() {
-        // 区间 seek 失败落回文件头：sv=0.823 偏离锚点 30.154 超过 30s 防呆
-        // 界 → 按未采到处理（不防呆会算出 drift≈+29.4 的假信号误杀好成片）
+        // 区间 seek 失败落回文件头：sv=0.823 偏离锚点 45.0 达 44.177s，超过
+        // 30s 防呆界 → 按未采到处理（不防呆会算出 drift≈+0.754 的假信号
+        // 误杀好成片——文件头的音画间隔被误当切点间隔参与对比）
         assertTrue(
             TrimService.assessSync(
                 sync(sv = 0.823, sa = 0.0, ov = 0.0, oa = -0.069),
-                seekSec = 30.154, expectedDurSec = 29.977,
+                seekSec = 45.0, expectedDurSec = 15.0,
             ).isEmpty(),
         )
     }
