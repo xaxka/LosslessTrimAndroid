@@ -47,6 +47,15 @@ object ThumbStore {
     var hwDecodeEnabled: Boolean = false
 
     /**
+     * 实验性“MediaCodec 直解缩略图”开关（设置页，AppViewModel 观察 settings 同步写入）。
+     * 开启后抽帧链路最前面插入 MediaCodecThumb 直解：10-bit HEVC 走 P010→8bit
+     * CPU 转换（stride/crop/旋转/颜色矩阵自管）、HDR 尝试请求 tone-map；
+     * 失败或不健康自动回退 FFmpeg 既有链路。用于验证“硬解10bit缩略图.txt”方案。
+     */
+    @Volatile
+    var mcThumbEnabled: Boolean = false
+
+    /**
      * 抽帧并发池：列表缩略图与交互预览分池，
      * 避免进分析页时预览排在列表抽帧后面干等（预览是用户盯着等的）。
      */
@@ -87,6 +96,27 @@ object ThumbStore {
         failed.put(key, System.currentTimeMillis())
     }
 
+    /**
+     * MediaCodec 直解失败哨兵：同 key 60s 内不再重试（镜像 FAILED_TTL_MS 语义）。
+     * 防坏设备上每张图都先卡一轮直解超时（最长 10s）才回退 ffmpeg。
+     */
+    private val mcFailed = object : LruCache<String, Long>(128) {
+        override fun sizeOf(key: String, value: Long): Int = 1
+    }
+
+    private fun isRecentlyMcFailed(key: String): Boolean {
+        val ts = mcFailed.get(key) ?: return false
+        if (System.currentTimeMillis() - ts > FAILED_TTL_MS) {
+            mcFailed.remove(key)
+            return false
+        }
+        return true
+    }
+
+    private fun markMcFailed(key: String) {
+        mcFailed.put(key, System.currentTimeMillis())
+    }
+
     /** 磁盘缓存文件数上限（单张 JPEG 仅几十 KB，512 张约几十 MB） */
     private const val DISK_MAX_FILES = 512
 
@@ -122,6 +152,7 @@ object ThumbStore {
     fun clearAll(context: Context): ClearResult {
         memCache.evictAll()
         failed.evictAll()
+        mcFailed.evictAll()
         diskDirCache = null     // 强制下次 diskDir() 重新解析（旧的已删）
         synchronized(recentFailures) { recentFailures.clear() }
         var bytes = 0L
@@ -233,6 +264,22 @@ object ThumbStore {
             sb.appendLine(r.stderr.takeLast(2000))
             sb.appendLine()
         }
+        // 实验性 MediaCodec 直解现场：成功也记（能力面/tone-map 是否采纳是实验关心的）
+        val mcAttempts = MediaCodecThumb.snapshotAttempts()
+        sb.appendLine("==== MediaCodec direct decode (experimental, recent ${mcAttempts.size}) ====")
+        if (mcAttempts.isEmpty()) {
+            sb.appendLine("(no attempts yet)")
+        }
+        mcAttempts.forEachIndexed { i, a ->
+            sb.appendLine(
+                "#${i + 1} ${if (a.ok) "OK" else "FAIL"} ${a.durationMs}ms decoder=${a.decoder ?: "(default)"} " +
+                        "mime=${a.mime} p010cap=${a.hasP010Cap} yuvflexcap=${a.hasYuvFlexCap} " +
+                        "outColorFormat=0x${a.outColorFormat.toString(16)} imageFormat=0x${a.imageFormat.toString(16)} " +
+                        "toneMap=${if (a.toneMapRequested) (if (a.toneMapApplied) "applied" else "rejected") else "n/a"} " +
+                        "manualHdr=${a.manualHdr} frames=${a.decodedFrames} seekMs=${a.timeMs} err=${a.error ?: "-"}"
+            )
+            sb.appendLine("    uri=…${a.uri.takeLast(80)}")
+        }
         return sb.toString()
     }
 
@@ -287,6 +334,9 @@ object ThumbStore {
                     memCache.get(key)
                         ?: loadFromDisk(app, key)   // 排队期间可能已被其它协程写入
                         ?: run {
+                            // 实验性 MediaCodec 直解优先；失败/不健康自动回退 ffmpeg 软解
+                            tryExtractViaMediaCodec(app, key, uri, timeMs, maxPx)
+                                ?.let { return@withContext it }
                             val ffmpegBmp = extractViaFfmpeg(app, uri, timeMs, maxPx, nearestKfSec, allowHw)
                             if (ffmpegBmp != null) {
                                 memCache.put(key, ffmpegBmp)
@@ -316,6 +366,7 @@ object ThumbStore {
             withContext(Dispatchers.IO) {
                 memCache.get(key)
                     ?: loadFromDisk(app, key)   // 排队期间可能已被其它协程写入缓存
+                    ?: run { tryExtractViaMediaCodec(app, key, uri, timeMs, maxPx) }
                     ?: extractViaFfmpeg(app, uri, timeMs, maxPx, allowHw = allowHw)?.also { bmp ->
                         memCache.put(key, bmp)
                         saveToDisk(app, key, bmp)
@@ -329,6 +380,56 @@ object ThumbStore {
                     }
             }
         }
+    }
+
+    // ---------------- 实验性：MediaCodec 直解 ----------------
+
+    /**
+     * 实验性 MediaCodec 直解抽帧（设置页“MediaCodec 直解缩略图”，详见 MediaCodecThumb）。
+     *
+     * 成功：过 isBitmapHealthy 后 memCache + diskCache 双入（与 ffmpeg 主路径同等待遇）；
+     * 失败/不健康：记录失败现场（via=mediacodec，附 MediaCodecThumb.lastDiag 能力面）
+     * + 写入 mcFailed 哨兵（60s 内同 key 不重试），返回 null 让调用方沿
+     * ffmpeg → platform 既有链路兑底——即 txt 建议的“只有 MediaCodec 不支持/
+     * 解码失败/P010 输出异常/厂商 codec bug 才 fallback 到 FFmpeg”。
+     */
+    private fun tryExtractViaMediaCodec(context: Context, key: String, uri: Uri, timeMs: Long, maxPx: Int): Bitmap? {
+        if (!mcThumbEnabled) return null
+        if (isRecentlyMcFailed(key)) return null
+        val bmp = runCatching { MediaCodecThumb.extract(context, uri, timeMs, maxPx) }.getOrNull()
+        if (bmp == null) {
+            markMcFailed(key)
+            recordFailure(FailureRecord(
+                at = System.currentTimeMillis(),
+                path = runCatchingPath(context, uri),
+                fileSize = runCatchingFileSize(context, uri),
+                timeMs = timeMs,
+                cmd = "(MediaCodec direct decode, experimental)",
+                returnCode = null,
+                stderr = "MediaCodec direct decode failed. ${MediaCodecThumb.lastDiag ?: "no diag"}",
+                via = "mediacodec",
+            ))
+            return null
+        }
+        if (!isBitmapHealthy(bmp)) {
+            markMcFailed(key)
+            bmp.recycle()
+            recordFailure(FailureRecord(
+                at = System.currentTimeMillis(),
+                path = runCatchingPath(context, uri),
+                fileSize = runCatchingFileSize(context, uri),
+                timeMs = timeMs,
+                cmd = "(MediaCodec direct decode, experimental)",
+                returnCode = null,
+                stderr = "MediaCodec bitmap rejected by isBitmapHealthy (stddev). " +
+                        "${MediaCodecThumb.lastDiag ?: ""}",
+                via = "mediacodec",
+            ))
+            return null
+        }
+        memCache.put(key, bmp)
+        saveToDisk(context, key, bmp)
+        return bmp
     }
 
     // ---------------- 抽帧 ----------------

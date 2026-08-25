@@ -125,6 +125,15 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
             GroupLabel("预览")
             SectionCard(title = null) {
                 SwitchRow(
+                    title = "MediaCodec 直解缩略图（实验）",
+                    subtitle = if (settings.mcDecodeThumbs)
+                        "系统解码器直接出图：10-bit 走 P010→8bit 转换、HDR 请求 tone-map，颜色自管；失败自动回退 FFmpeg。结果可从下方诊断日志查看"
+                    else "FFmpeg 软/硬解抽帧（默认）。开启后验证 10-bit 硬解直解可行性：更快且不受 SAF 路径限制",
+                    checked = settings.mcDecodeThumbs,
+                    onChange = { v -> vm.updateSettings { it.copy(mcDecodeThumbs = v) } },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                SwitchRow(
                     title = "缩略图硬解（实验）",
                     subtitle = if (settings.hwDecodeThumbs)
                         "GPU 硬解抽帧快 5-10 倍；10-bit 文件自动回软解保颜色。旧探测缓存（无像素格式）也会回软解，清缓存重扫后生效"

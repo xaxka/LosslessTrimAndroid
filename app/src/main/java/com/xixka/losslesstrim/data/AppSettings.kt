@@ -34,6 +34,12 @@ data class AppSettings(
     val overwriteConfirmed: Boolean = false,
     /** 缩略图使用硬件解码（mediacodec）：快但 10-bit HEVC 颜色可能不准 */
     val hwDecodeThumbs: Boolean = false,
+    /**
+     * 实验性：MediaCodec 直解缩略图（绕开 FFmpeg，直接用系统解码器 + 自管颜色）：
+     * 10-bit 走 P010→8bit CPU 转换，HDR 尝试请求 tone-map；失败自动回退 FFmpeg。
+     * 用于验证“硬解10bit缩略图.txt”方案可行性。
+     */
+    val mcDecodeThumbs: Boolean = false,
 )
 
 class SettingsRepository(private val context: Context) {
@@ -47,6 +53,7 @@ class SettingsRepository(private val context: Context) {
         val TRUNCATE = booleanPreferencesKey("truncate_overlong")
         val CONFIRMED = booleanPreferencesKey("overwrite_confirmed")
         val HW_THUMBS = booleanPreferencesKey("hw_decode_thumbs")
+        val MC_THUMBS = booleanPreferencesKey("mc_decode_thumbs")
         /** 每文件覆盖设置（含丢弃轨道）整体序列化为一个 JSON 串 */
         val OVERRIDES = stringPreferencesKey("per_file_overrides")
     }
@@ -60,6 +67,7 @@ class SettingsRepository(private val context: Context) {
             truncateOverlong = p[Keys.TRUNCATE] ?: true,
             overwriteConfirmed = p[Keys.CONFIRMED] ?: false,
             hwDecodeThumbs = p[Keys.HW_THUMBS] ?: false,
+            mcDecodeThumbs = p[Keys.MC_THUMBS] ?: false,
         )
     }
 
@@ -89,6 +97,7 @@ class SettingsRepository(private val context: Context) {
                 truncateOverlong = p[Keys.TRUNCATE] ?: true,
                 overwriteConfirmed = p[Keys.CONFIRMED] ?: false,
                 hwDecodeThumbs = p[Keys.HW_THUMBS] ?: false,
+                mcDecodeThumbs = p[Keys.MC_THUMBS] ?: false,
             )
             val next = transform(cur)
             p[Keys.MODE] = next.mode.ordinal
@@ -98,6 +107,7 @@ class SettingsRepository(private val context: Context) {
             p[Keys.TRUNCATE] = next.truncateOverlong
             p[Keys.CONFIRMED] = next.overwriteConfirmed
             p[Keys.HW_THUMBS] = next.hwDecodeThumbs
+            p[Keys.MC_THUMBS] = next.mcDecodeThumbs
         }
     }
 }
