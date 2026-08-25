@@ -25,6 +25,20 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
+ * 同步校验采样点（[Probe.probeSyncSamples] 的产物，判定见
+ * com.xixka.losslesstrim.trim.TrimService.assessSync）。
+ * null = 该项未采到（纯音频/纯视频源、容器不支持区间读、字幕稀疏、采样
+ * 防呆拦截），判定侧跳过对应校验——采样失败 ≠ 输出坏。
+ */
+class SyncSamples(
+    val srcVideoPts: Double? = null,
+    val srcAudioPts: Double? = null,
+    val outVideoPts: Double? = null,
+    val outAudioPts: Double? = null,
+    val outSubtitlePts: Double? = null,
+)
+
+/**
  * ffprobe 封装：媒体信息（流列表）+ 关键帧位置探测。
  *
  * 稳定性设计（针对 ffmpeg-kit fork 日志通道的三层防线）：
@@ -617,6 +631,76 @@ object Probe {
         } catch (e: Exception) {
             probeKeyframes(context, uri)
         }
+    }
+
+    /**
+     * 采样指定流的首包 pts_time（秒）——同步校验的采样原语。
+     *
+     * fromSec 非空时用 -read_intervals 做**区间定点读**（"fromSec%+#N"）：
+     * 只 demux seek 落点之后的 N 个包。落点语义（实测）：≤fromSec 的最近
+     * 索引点（视频流=关键帧）——与 ffmpeg -ss(noaccurate) 的落点同构，
+     * 这正是音画 drift 对比需要的锚点。matroska/mp4 有索引毫秒级返回，
+     * GB 级 4K 源也只触碰几 MB（对照 [probeKeyframesNear] 的定点读思路）。
+     * fromSec=null 从文件头读。
+     *
+     * 字幕流的 seek 不生效（实测 matroska：带 fromSec 与从头读结果一致，
+     * read_intervals 对字幕流仍从文件头读），字幕只应从头采样。
+     *
+     * 解析容错：输出可能混入错误日志行（SessionBridge 混采），取第一个
+     * 可解析为 double 的行；失败/空输出返回 null——采样失败 ≠ 输出坏，
+     * 判定侧（TrimService.assessSync）按"该项未采到"跳过对应校验，
+     * 不因采样抖动误杀好成片。
+     */
+    suspend fun probeFirstPacketPts(path: String, streamSpec: String, fromSec: Double? = null): Double? =
+        withContext(Dispatchers.IO) {
+            val interval = if (fromSec != null) {
+                String.format(java.util.Locale.US, "%.3f%%+#8", fromSec)
+            } else "%+#8"
+            val outcome = runProbe(
+                "-v error -read_intervals \"$interval\" -select_streams $streamSpec " +
+                        "-show_entries packet=pts_time -of csv=p=0 -i \"$path\""
+            )
+            if (!outcome.ok || outcome.output.isBlank()) null
+            else outcome.output.lineSequence()
+                .map { it.trim() }
+                .firstNotNullOfOrNull { it.toDoubleOrNull() }
+        }
+
+    /**
+     * 同步校验采样（两步采样协议，数值矩阵见 scripts/verify-timeline.sh T12）：
+     *
+     * - 源侧：视频流在 seekSec 锚点（=命令真实 -ss 值）采样首包 sv——落点即
+     *   切点关键帧；**再以 sv 为锚**采样音频首包 sa——两者构成"切点时刻"
+     *   的音画 pts 对。片头剪（seekSec≈0，命令不传 -ss）两侧都从头采样：
+     *   剪辑从文件头顺序保留，首包对就是切点对（音频以 sv 为锚反而采到
+     *   错误时刻，drift 会假报 ~音画偏移量）。
+     * - 输出侧：视频/音频/字幕各从头采样首包（ov/oa/os）。
+     * - 判定（drift 模型 + 字幕绝对界）在 TrimService.assessSync，纯函数可单测。
+     *
+     * outHasSubtitle=false 时不探测输出字幕：字幕稀疏，`-select_streams s`
+     * 从头读要 demux 到凑满 N 包才返回，无字幕输出会**读完整个文件**才
+     * 得到空结果（GB 级全保留文件被白读一遍）。
+     */
+    suspend fun probeSyncSamples(
+        srcPath: String,
+        outPath: String,
+        seekSec: Double,
+        outHasSubtitle: Boolean,
+    ): SyncSamples {
+        val seek = seekSec.takeIf { it > 0.001 }
+        val srcVideo = probeFirstPacketPts(srcPath, "v:0", seek)
+        return SyncSamples(
+            srcVideoPts = srcVideo,
+            // 中段剪：音频锚定视频关键帧时刻；片头剪：从头（见函数注释）
+            srcAudioPts = if (seek != null) {
+                probeFirstPacketPts(srcPath, "a:0", srcVideo)
+            } else {
+                probeFirstPacketPts(srcPath, "a:0")
+            },
+            outVideoPts = probeFirstPacketPts(outPath, "v:0"),
+            outAudioPts = probeFirstPacketPts(outPath, "a:0"),
+            outSubtitlePts = if (outHasSubtitle) probeFirstPacketPts(outPath, "s:0") else null,
+        )
     }
 
     /**

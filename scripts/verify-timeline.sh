@@ -19,6 +19,10 @@
 #     T11 B帧源中段剪起点：make_zero 残留重排延迟复现（线上形态"输出校验
 #         失败(起点未归零 start=0.200s)"）；修复=全程不传 -avoid_negative_ts
 #         （ffmpeg 默认 auto），mkv/mp4 双容器归零
+#     T12 同步校验：音视频 drift（两步采样）+ 字幕绝对时间界——健康剪
+#         drift≈0/字幕在窗；丢头音频坏剪 drift=+0.743 触发；未随切点
+#         平移的绝对时间戳字幕越界触发（app 侧 = Probe.probeSyncSamples
+#         + TrimService.assessSync）
 set -euo pipefail
 W="$(mktemp -d)"
 cd "$W"
@@ -352,5 +356,91 @@ python3 -c "exit(0 if abs($ST11) < 0.05 and abs($ST11M) < 0.05 else 1)" \
 decode_clean t11.mkv || { echo "T11 FAIL: mkv 解码错误"; exit 1; }
 decode_clean t11.mp4 || { echo "T11 FAIL: mp4 解码错误"; exit 1; }
 echo "  T11 PASS（B帧重排源 mkv/mp4 双容器起点归零）"
+
+# ---- T12 音视频/字幕同步校验（drift 模型 + 字幕绝对界）----
+# 对应 app 实现：Probe.probeSyncSamples（两步采样）+ TrimService.assessSync。
+# 采样：源@-ss 锚点采视频首包 sv（落点=切点关键帧，与 ffmpeg -ss 落点
+# 同构），再以 sv 为锚采音频首包 sa；输出从头采 ov/oa/首字幕包。
+# 判定：
+#   drift_av=(oa−ov)−(sa−sv)，|drift|>0.5 → 音视频不同步。健康剪 ≈0
+#   （实测 −0.069，包粒度/封装噪声）；丢头音频坏剪（-ss 0+make_zero）
+#   实测 +0.743 → 触发。
+#   字幕绝对界：首 cue ∈ [−0.5, ov+期望时长+0.5]（上界锚输出视频首帧，
+#   平移免疫；期望时长=对齐区间——探测时长会被拖尾字幕撑大，不可用）。
+#   未随切点平移的绝对时间戳 cue（32s ≫ 上界）→ 触发。
+smp() { # file 流选择 seek(空=从头) → 首包 pts_time
+  local out
+  if [ -n "${3:-}" ]; then
+    out="$(ffprobe -v error -read_intervals "$3%+#8" -select_streams "$2" \
+      -show_entries packet=pts_time -of csv=p=0 "$1" 2>/dev/null | head -1)"
+  else
+    out="$(ffprobe -v error -read_intervals "%+#8" -select_streams "$2" \
+      -show_entries packet=pts_time -of csv=p=0 "$1" 2>/dev/null | head -1)"
+  fi
+  echo "${out:-}"
+}
+sync_judge() { # sv sa ov oa os seek expected_dur → stdout=问题列表（空=通过）；复刻 app assessSync
+  python3 - "$@" <<'PY'
+import sys
+def num(x): return float(x) if x.strip() not in ("", "None") else None
+sv, sa, ov, oa, os_ = (num(x) for x in sys.argv[1:6])
+seek, exp = float(sys.argv[6]), float(sys.argv[7])
+if seek > 0.001 and sv is not None and abs(sv - seek) > 30.0:
+    sv = None; sa = None
+if sv is not None and sa is not None and abs(sa - sv) > 10.0:
+    sa = None
+if None not in (sv, sa, ov, oa):
+    drift = (oa - ov) - (sa - sv)
+    print(f"  drift_av={drift:+.3f}", file=sys.stderr)
+    if abs(drift) > 0.5:
+        print(f"音视频不同步(drift={drift:+.3f}s)")
+else:
+    print(f"  drift_av= n/a (sv={sv} sa={sa} ov={ov} oa={oa})", file=sys.stderr)
+if os_ is not None:
+    hi = (ov or 0.0) + exp + 0.5
+    print(f"  sub0={os_:.3f} 窗口[-0.5,{hi:.3f}]", file=sys.stderr)
+    if os_ < -0.5 or os_ > hi:
+        print(f"字幕时间轴异常(start={os_:.3f}s)")
+PY
+}
+
+echo; echo "== T12 同步校验·健康臂1（T2 中段剪产物，drift/字幕均应通过）:"
+SV=$(smp src.mkv 0 "$SS"); SA=$(smp src.mkv 1 "$SV")
+OV=$(smp t2.mkv 0); OA=$(smp t2.mkv 1); OS=$(smp t2.mkv s)
+echo "  src@切点: v=$SV a=$SA | out: v=$OV a=$OA s=$OS"
+ISSUES="$(sync_judge "$SV" "$SA" "$OV" "$OA" "$OS" "$SS" "$T")"
+[ -z "$ISSUES" ] || { echo "T12 FAIL(健康臂1误报): $ISSUES"; exit 1; }
+echo "  T12 健康臂1 PASS"
+
+echo; echo "== T12 同步校验·健康臂2（T4 片头剪产物，音频超前源平移免疫）:"
+SVL=$(smp lead.mkv 0); SAL=$(smp lead.mkv 1)
+OVL=$(smp t4.mkv 0); OAL=$(smp t4.mkv 1); OSL=$(smp t4.mkv s)
+echo "  src@头: v=$SVL a=$SAL | out: v=$OVL a=$OAL s=$OSL"
+ISSUES="$(sync_judge "$SVL" "$SAL" "$OVL" "$OAL" "$OSL" "0" "$T4")"
+[ -z "$ISSUES" ] || { echo "T12 FAIL(健康臂2误报): $ISSUES"; exit 1; }
+echo "  T12 健康臂2 PASS"
+
+echo; echo "== T12 同步校验·坏剪臂1（T3 产物 -ss0+make_zero 丢头音频，drift 应触发）:"
+OV3=$(smp t3.mkv 0); OA3=$(smp t3.mkv 1)
+echo "  out: v=$OV3 a=$OA3"
+ISSUES="$(sync_judge "$SVL" "$SAL" "$OV3" "$OA3" "" "0" "$T4")"
+echo "$ISSUES" | grep -q "音视频不同步" || { echo "T12 FAIL(丢头音频未触发 drift 检查): $ISSUES"; exit 1; }
+echo "  T12 坏剪臂1 PASS（drift 检查触发）"
+
+echo; echo "== T12 同步校验·坏剪臂2（字幕未随切点平移，绝对界应触发）:"
+cat > subs3.srt <<'EOF'
+1
+00:00:32,000 --> 00:00:34,000
+At32sAbsolute
+EOF
+# 视频/音频取自 -ss 平移后的输入0（[0,~30]），字幕取自未平移的 srt 输入1
+# （绝对 32s）——构造"字幕没跟上切点"的坏形态
+ffmpeg -hide_banner -loglevel error -y -ss "$SS" -noaccurate_seek -i src.mkv -i subs3.srt \
+  -map 0:v -map 0:a -map 1:s -c copy -map_metadata 0 -f matroska subbad.mkv
+OVB=$(smp subbad.mkv 0); OAB=$(smp subbad.mkv 1); OSB=$(smp subbad.mkv s)
+echo "  out: v=$OVB a=$OAB s=$OSB（首 cue=源绝对时间戳，远超窗口上界）"
+ISSUES="$(sync_judge "$SV" "$SA" "$OVB" "$OAB" "$OSB" "$SS" "$T")"
+echo "$ISSUES" | grep -q "字幕时间轴异常" || { echo "T12 FAIL(绝对时间戳字幕未触发): $ISSUES"; exit 1; }
+echo "  T12 坏剪臂2 PASS（字幕绝对界触发）"
 
 echo; echo "ALL PASS"

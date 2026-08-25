@@ -41,5 +41,5 @@ jobs:
       - name: Thumbnail frame-extract matrix
         run: bash scripts/verify-thumb.sh
 
-      - name: E2E timeline matrix (T1-T11)
+      - name: E2E timeline matrix (T1-T12)
         run: bash scripts/verify-timeline.sh

@@ -24,6 +24,7 @@ import com.xixka.losslesstrim.data.TrimPlan
 import com.xixka.losslesstrim.data.VideoEntry
 import com.xixka.losslesstrim.ffmpeg.Probe
 import com.xixka.losslesstrim.ffmpeg.SessionBridge
+import com.xixka.losslesstrim.ffmpeg.SyncSamples
 import com.xixka.losslesstrim.util.Formats
 import com.xixka.losslesstrim.util.StorageAccess
 import kotlinx.coroutines.CoroutineScope
@@ -93,6 +94,18 @@ class TrimService : Service() {
             val st = probe.startTimeSec ?: 0.0
             return SEEK_FUDGE_SEC + (-st).coerceAtLeast(0.0)
         }
+
+        /**
+         * 实际传给 ffmpeg 的 -ss 值 = 关键帧对齐起点 + seek 前移补偿
+         * （[seekFudgeSec]）。片头剪（actualStart≈0 → fudge=0）结果为 0，
+         * [seekArgs] 会省略 -ss。
+         *
+         * 纯函数：命令装配（[assembleCommand]）与输出侧同步校验的源采样
+         * 锚点（[Probe.probeSyncSamples]）共用——采样锚点必须与真实 -ss
+         * 严格一致，锚点偏了 drift 就是假信号。
+         */
+        fun seekTargetSec(plan: TrimPlan, probe: ProbeResult): Double =
+            plan.actualStart + seekFudgeSec(plan.actualStart, probe)
 
         /**
          * 输入侧 seek 参数（" -ss X -noaccurate_seek"）；片头剪切（ss≈0）返回空串——
@@ -271,6 +284,90 @@ class TrimService : Service() {
         /** 时长校验容差（秒）：GOP 对齐后实际时长与计划值的合法偏差上限 */
         const val DURATION_TOLERANCE_SEC = 2.0
 
+        /** 音视频同步容差（秒）：|drift| 超过即判"音视频不同步"失败 */
+        const val SYNC_DRIFT_TOLERANCE_SEC = 0.5
+
+        /** 字幕时间轴窗口容差（秒）：首 cue 落在 [−0.5, ov+期望时长+0.5] 之外判异常 */
+        const val SUBTITLE_WINDOW_TOLERANCE_SEC = 0.5
+
+        /**
+         * 采样防呆：源视频采样点与 -ss 锚点的最大合法偏离（秒）。
+         * 落点=≤锚点的关键帧，合法偏离上限即 GOP 长度；超过 30s 视为区间
+         * seek 失败落回文件头（采样值≈文件头首包），按未采到处理——不防呆
+         * 会算出 ≈切点偏移量的假 drift 误杀好成片（残留边界：切点很浅时
+         * seek 失败与超长 GOP 落点不可分，接受，由时长校验兜底）。
+         */
+        const val SYNC_SAMPLE_MAX_LAG_SEC = 30.0
+
+        /** 采样防呆：源侧音画首包 pts 差的合法上限（秒）。真实片源音画偏移远小于此值，超过多为音频采样落回文件头 */
+        const val SYNC_SRC_AV_OFFSET_MAX_SEC = 10.0
+
+        /**
+         * 输出同步校验（纯函数，单测覆盖）：时间轴（起点/时长/流存在性）
+         * 之外，验证"剪完之后音画/字幕的时间还对得上"。返回问题列表，空=通过。
+         *
+         * 1) 音视频同步——两步采样 drift 模型：
+         *
+         *        drift_av = (oa − ov) − (sa − sv)
+         *
+         *    源/输出各取"切点时刻"的音画 pts 对（sv/sa 源侧锚定 -ss 落点，
+         *    ov/oa 输出侧首包，采样见 [Probe.probeSyncSamples]）。同步保持
+         *    时两组音画间隔相等（drift≈0，包粒度噪声 <0.1s）；两类真实坏
+         *    形态都会放大成大 drift：头部音频被丢（-ss 0 + make_zero，实测
+         *    drift=+0.743s）、音频/视频未随切点平移（drift≈切点偏移量）。
+         *    容差 0.5s：AAC 帧粒度(~23ms)、mkv 首包基线、mp4 edit list 负
+         *    CTS 等正常封装噪声都在 ±0.1s 内，与真实 desync 间隔一个数量级。
+         *    任一采样为 null（纯视频/纯音频源、区间读失败、防呆拦截）→ 跳过：
+         *    采样失败 ≠ 输出坏。
+         *
+         * 2) 字幕时间轴——输出侧绝对界：首个字幕包 pts 必须落在
+         *
+         *        [−0.5, ov + 期望时长 + 0.5]
+         *
+         *    上界锚定输出视频首帧 ov（平移免疫：音频超前源整体平移后 cue
+         *    随 ov 平移，窗口跟着走）；**期望时长用对齐后实际区间
+         *    （plan.duration）而非探测时长**——拖尾字幕会把容器时长撑大，
+         *    用探测时长做界恰好放过越界字幕。窗口内无 cue（稀疏字幕）/
+         *    未保留字幕 → 采样 null → 跳过。
+         *    只查输出侧：源侧字幕采样不可行（ffprobe 字幕流区间 seek 不
+         *    生效，从头读全量字幕包对 GB 级源=整文件 demux）；真实管线
+         *    -ss 作输入项对所有流统一 ts_offset，字幕错位的现实形态
+         *    （cue 整体越过窗口）恰被此界捕获。
+         */
+        fun assessSync(
+            samples: SyncSamples,
+            seekSec: Double,
+            expectedDurSec: Double,
+        ): List<String> {
+            val issues = ArrayList<String>()
+            // 采样防呆：见各常量注释；sv 被拦则 sa 锚点随之失效，连带跳过
+            var sv = samples.srcVideoPts
+            var sa = samples.srcAudioPts
+            if (seekSec > 0.001 && sv != null && abs(sv - seekSec) > SYNC_SAMPLE_MAX_LAG_SEC) {
+                sv = null
+                sa = null
+            }
+            if (sv != null && sa != null && abs(sa - sv) > SYNC_SRC_AV_OFFSET_MAX_SEC) {
+                sa = null
+            }
+            val ov = samples.outVideoPts
+            val oa = samples.outAudioPts
+            if (sv != null && sa != null && ov != null && oa != null) {
+                val drift = (oa - ov) - (sa - sv)
+                if (abs(drift) > SYNC_DRIFT_TOLERANCE_SEC) {
+                    issues += "音视频不同步(drift=${Formats.secs3(drift)}s)"
+                }
+            }
+            val sub = samples.outSubtitlePts
+            if (sub != null) {
+                val hi = (ov ?: 0.0) + expectedDurSec + SUBTITLE_WINDOW_TOLERANCE_SEC
+                if (sub < -SUBTITLE_WINDOW_TOLERANCE_SEC || sub > hi) {
+                    issues += "字幕时间轴异常(start=${Formats.secs3(sub)}s)"
+                }
+            }
+            return issues
+        }
+
         /**
          * 剪辑命令装配（纯函数，单测逐段断言——**这是防回退的关键锚点**：
          * 任何人在这里去掉 fudge/钳制/disposition 等装配步骤，TrimCommandTest
@@ -291,8 +388,7 @@ class TrimService : Service() {
             probe: ProbeResult,
             clampSubtitles: Boolean = true,
         ): String {
-            val fudge = seekFudgeSec(plan.actualStart, probe)
-            val ss = plan.actualStart + fudge
+            val ss = seekTargetSec(plan, probe)
             val dur = (plan.actualEnd - ss).coerceAtLeast(0.001)
             val sb = StringBuilder()
             sb.append("-hide_banner -y")
@@ -805,6 +901,11 @@ class TrimService : Service() {
      * 输出时间轴校验：ffprobe 只读容器头（大文件也秒回）。TS/PS 系起点阈值
      * 放宽到 1.6s（muxdelay 已清零，但 PCR 前导仍有小偏移；广播流普遍如此，
      * 播放器按相对时间轴播放无感）。
+     *
+     * 时间轴检查之外再做同步校验（[assessSync]：音视频 drift + 字幕绝对界），
+     * 采样 = 源侧两次区间定点读 + 输出侧首包读，均毫秒级；源采样锚点用
+     * [seekTargetSec]（与命令真实 -ss 一致）。纯音频且未保留字幕时无可
+     * 校验项，跳过采样。
      */
     private suspend fun verifyOutputTimeline(
         path: String,
@@ -817,8 +918,10 @@ class TrimService : Service() {
         if (!probe.probeOk) return listOf("输出无法解析（${probe.error ?: "?"}）")
         val videoKept = entry.probe.streams.any { it.isVideo && it.index in kept }
         val audioKept = entry.probe.streams.any { it.isAudio && it.index in kept }
+        val subKept = entry.probe.streams.any { it.isSubtitle && it.index in kept }
         val tsFamily = target.muxer == "mpegts" || target.muxer == "mpeg" || target.muxer == "asf"
-        return assessTimeline(
+        val issues = ArrayList<String>()
+        issues += assessTimeline(
             start = probe.startTimeSec,
             dur = probe.durationSec,
             expectedDurSec = plan.duration,
@@ -828,6 +931,18 @@ class TrimService : Service() {
             audioKept = audioKept,
             startToleranceSec = if (tsFamily) 1.6 else 0.1,
         )
+        val srcPath = entry.filePath
+        if (srcPath != null && (videoKept || subKept)) {
+            val seekSec = seekTargetSec(plan, entry.probe)
+            val samples = Probe.probeSyncSamples(
+                srcPath = srcPath,
+                outPath = path,
+                seekSec = seekSec,
+                outHasSubtitle = probe.streams.any { it.isSubtitle },
+            )
+            issues += assessSync(samples, seekSec, plan.duration)
+        }
+        return issues
     }
 
     private fun buildCommand(

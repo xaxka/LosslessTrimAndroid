@@ -3,6 +3,7 @@ package com.xixka.losslesstrim
 import com.xixka.losslesstrim.data.ProbeResult
 import com.xixka.losslesstrim.data.StreamInfo
 import com.xixka.losslesstrim.data.TrimPlan
+import com.xixka.losslesstrim.ffmpeg.SyncSamples
 import com.xixka.losslesstrim.trim.OutputTarget
 import com.xixka.losslesstrim.trim.TrimService
 import org.junit.Assert.assertEquals
@@ -314,6 +315,157 @@ class TrimCommandTest {
                 startToleranceSec = 1.6,
             ).isEmpty(),
         )
+    }
+
+    // ---------- assessSync（音视频 drift + 字幕绝对界，数值取自 verify-timeline.sh T12 实测） ----------
+
+    private fun sync(
+        sv: Double? = null, sa: Double? = null,
+        ov: Double? = null, oa: Double? = null, os: Double? = null,
+    ) = SyncSamples(sv, sa, ov, oa, os)
+
+    @Test
+    fun `healthy mid cut drift and subtitle pass`() {
+        // T12 健康臂实测：src@切点 v=30.023 a=30.023 | out v=0.000 a=-0.069 s=2.000
+        //（-0.069 = 输出 mkv 首包基线/edit list 类封装噪声，远小于 0.5 容差）
+        assertTrue(
+            TrimService.assessSync(
+                sync(sv = 30.023, sa = 30.023, ov = 0.0, oa = -0.069, os = 2.0),
+                seekSec = 30.154, expectedDurSec = 29.977,
+            ).isEmpty(),
+        )
+    }
+
+    @Test
+    fun `audio leading source head cut passes`() {
+        // T12 健康臂实测（音频超前 0.8s 源片头剪）：src v=0.823 a=0.000 |
+        // out v=0.823 a=0.000 s=5.823 —— 源音画间隔被原样保留（drift=0），
+        // 字幕窗口随 ov=0.823 平移（上界 31.323）
+        assertTrue(
+            TrimService.assessSync(
+                sync(sv = 0.823, sa = 0.0, ov = 0.823, oa = 0.0, os = 5.823),
+                seekSec = 0.0, expectedDurSec = 30.0,
+            ).isEmpty(),
+        )
+    }
+
+    @Test
+    fun `dropped head audio drift fails`() {
+        // T12 坏剪臂实测（-ss 0 + make_zero 丢头音频）：src v=0.823 a=0.000 |
+        // out v=0.080 a=0.000 → drift=+0.743 超容差
+        val issues = TrimService.assessSync(
+            sync(sv = 0.823, sa = 0.0, ov = 0.08, oa = 0.0),
+            seekSec = 0.0, expectedDurSec = 30.0,
+        )
+        assertEquals(1, issues.size)
+        assertTrue(issues[0].contains("音视频不同步"))
+        assertTrue(issues[0].contains("0.743"))
+    }
+
+    @Test
+    fun `audio keeping absolute timestamps fails`() {
+        // 音频未随切点平移（保源绝对时间戳）：oa−ov=30.023 而 sa−sv=0 →
+        // drift=+30.023
+        val issues = TrimService.assessSync(
+            sync(sv = 30.023, sa = 30.023, ov = 0.0, oa = 30.023),
+            seekSec = 30.154, expectedDurSec = 29.977,
+        )
+        assertEquals(1, issues.size)
+        assertTrue(issues[0].contains("音视频不同步"))
+    }
+
+    @Test
+    fun `null samples skip drift check`() {
+        // 纯视频源/采样失败：不判失败（采样失败 ≠ 输出坏）
+        assertTrue(
+            TrimService.assessSync(
+                sync(sv = 30.023, sa = null, ov = 0.0, oa = null),
+                seekSec = 30.154, expectedDurSec = 29.977,
+            ).isEmpty(),
+        )
+    }
+
+    @Test
+    fun `seek failure head landing is skipped not failed`() {
+        // 区间 seek 失败落回文件头：sv=0.823 偏离锚点 30.154 超过 30s 防呆
+        // 界 → 按未采到处理（不防呆会算出 drift≈+29.4 的假信号误杀好成片）
+        assertTrue(
+            TrimService.assessSync(
+                sync(sv = 0.823, sa = 0.0, ov = 0.0, oa = -0.069),
+                seekSec = 30.154, expectedDurSec = 29.977,
+            ).isEmpty(),
+        )
+    }
+
+    @Test
+    fun `long gop landing is still verified`() {
+        // 超长 GOP（25s）合法落点：sv 偏离锚点 25.154 < 30s 防呆界 → 照常
+        // 校验，drift=(0−0)−(4.977−5.0)=+0.023 通过
+        assertTrue(
+            TrimService.assessSync(
+                sync(sv = 5.0, sa = 4.977, ov = 0.0, oa = 0.0),
+                seekSec = 30.154, expectedDurSec = 29.977,
+            ).isEmpty(),
+        )
+    }
+
+    @Test
+    fun `shifted subtitle within anchored window passes`() {
+        // 音频超前源整体平移：ov=0.823 锚定窗口 [−0.5, 31.323]，窗口末端
+        // cue 30.7 合法（若错误地用 0 锚定或 planDur 不含平移会误报）
+        assertTrue(
+            TrimService.assessSync(
+                sync(ov = 0.823, os = 30.7),
+                seekSec = 0.0, expectedDurSec = 30.0,
+            ).isEmpty(),
+        )
+    }
+
+    @Test
+    fun `unshifted subtitle beyond window fails`() {
+        // 字幕未随切点平移（保源绝对时间戳 32s）：窗口上界 0+29.977+0.5=30.477
+        val issues = TrimService.assessSync(
+            sync(ov = 0.0, os = 32.0),
+            seekSec = 30.154, expectedDurSec = 29.977,
+        )
+        assertEquals(1, issues.size)
+        assertTrue(issues[0].contains("字幕时间轴异常"))
+    }
+
+    @Test
+    fun `subtitle before container start fails`() {
+        // bsf 损坏类异常：首 cue 落在容器起点之前
+        val issues = TrimService.assessSync(
+            sync(ov = 0.0, os = -0.9),
+            seekSec = 0.0, expectedDurSec = 30.0,
+        )
+        assertEquals(1, issues.size)
+        assertTrue(issues[0].contains("字幕时间轴异常"))
+    }
+
+    @Test
+    fun `no subtitle sample skips window check`() {
+        // 窗口内无 cue（稀疏字幕）/未保留字幕：跳过，不判失败
+        assertTrue(
+            TrimService.assessSync(
+                sync(ov = 0.0, os = null),
+                seekSec = 30.154, expectedDurSec = 29.977,
+            ).isEmpty(),
+        )
+    }
+
+    // ---------- seekTargetSec（采样锚点与命令 -ss 严格一致） ----------
+
+    @Test
+    fun `seekTargetSec matches command ss and zeroes on head cut`() {
+        // bframeProbe：fudge = 0.131 + 0.023(start_time) = 0.154（与
+        // assembleCommand 断言的 -ss 30.154 同源；锚点偏了 drift 就是假信号）
+        val plan = TrimPlan(
+            ok = true, requestedStart = 30.0, requestedEnd = 60.0,
+            actualStart = 30.0, actualEnd = 60.0,
+        )
+        assertEquals(30.154, TrimService.seekTargetSec(plan, bframeProbe()), 1e-9)
+        assertEquals(0.0, TrimService.seekTargetSec(plan.copy(actualStart = 0.0), bframeProbe()), 1e-9)
     }
 
     // ---------- assembleCommand（装配锚点：任何装配步骤被回退即红） ----------
