@@ -23,12 +23,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.filled.BookmarkBorder
-import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.SkipNext
-import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
@@ -65,6 +60,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.xixka.losslesstrim.ui.icons.Bookmark
+import com.xixka.losslesstrim.ui.icons.BookmarkBorder
+import com.xixka.losslesstrim.ui.icons.Pause
+import com.xixka.losslesstrim.ui.icons.SkipNext
+import com.xixka.losslesstrim.ui.icons.SkipPrevious
 import com.xixka.losslesstrim.ui.theme.BlExt
 import com.xixka.losslesstrim.ui.theme.BlMono
 import com.xixka.losslesstrim.ui.theme.BlSurfaceVariant

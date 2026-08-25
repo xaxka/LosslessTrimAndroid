@@ -49,7 +49,14 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 代码压缩 + 资源压缩（防崩溃的混淆边界规则见 app/proguard-rules.pro，
+            // 关键是 ffmpeg-kit JNI 整包保留；Room/Compose/协程均已自带 consumer 规则）
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             signingConfig = signingConfigs.getByName("release")
         }
         debug {
@@ -82,7 +89,12 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
+    // 图标只用核心集（ArrowBack/PlayArrow/Settings 等都在 core 内），弃用
+    // extended（数千个图标类拖慢编译、debug 包臃肿）；Bookmark/Pause/SkipNext/
+    // SkipPrevious 等 5 个不在 core 的图标在 ui/icons/ExtendedIcons.kt 本地补齐
+    // （path 数据逐字取自 material-icons-extended 1.6.8 官方源码，几何一致）。
+    // release 构建另有 R8 收缩，未引用图标本就不会进 dex。
+    implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.activity:activity-compose:1.9.0")
     implementation("androidx.core:core-ktx:1.13.1")
@@ -92,13 +104,13 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
-    // ffmpeg-kit 社区维护版 fork（ffmpeg-kit 官方已归档）。切到 full 包：
-    // min 包只含 demux/mux + stream copy，**不含 HEVC/H.264 软解码器**——抽
-    // 帧时（-frames:v 1）触发解码但 fallback 解码器在 HEVC + B 帧 + 不
-    // 标准 MP4 上系统性花屏（粉红条带 / 绿红紫混合）；full 包内置
-    // x264/x265/dav1d 等完整软解码器，独立 I 帧可解无参考需求，必然稳定。
-    // APK 体积约 +60MB（full vs min 的 native lib 差），个人自用工具可接受。
-    implementation("com.antonkarpenko:ffmpeg-kit-full:2.2.1")
+    // ffmpeg-kit 社区维护版 fork（ffmpeg-kit 官方已归档）。换回 min 包：
+    // 曾因 HEVC 抽帧"花屏"切到 full（+60MB native lib），后定位真正根因是
+    // limited-range 视频直出 JPEG 的颜色范围错误，已由 ThumbStore 的
+    // scale out_range=pc 修复（2026-08-23）；min 包内置 libavcodec 原生
+    // h264/hevc 软解 + Android MediaCodec 硬解，剪辑走 -c copy 无需编解码器，
+    // full 的体积开销不再值得。若再遇个别片源抽帧异常，优先查颜色范围/硬解回退链。
+    implementation("com.antonkarpenko:ffmpeg-kit-min:2.2.1")
 
     // Room：探测结果/关键帧持久缓存（进程重启后免重扫，详见 data/CacheDb.kt）
     implementation("androidx.room:room-runtime:2.6.1")

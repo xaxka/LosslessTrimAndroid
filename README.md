@@ -20,7 +20,7 @@
 
 - Kotlin + Jetpack Compose（Material 3）
 - UI 遵循 **Blue Light UI** 设计系统：固定浅色（冷白底 × 白卡 1dp 描边 × 浅蓝主强调 × 语义状态色），无阴影卡片、统一空状态、统计卡结果页
-- [ffmpeg-kit 社区维护版 fork](https://github.com/sk3llo/ffmpeg-kit-flutter)（`com.antonkarpenko:ffmpeg-kit-full`，官方 ffmpeg-kit 已归档）：full 包内置 x264/x265/dav1d 等完整软解码器，切点抽帧走 ffmpeg 软解稳定（min 包缺 HEVC 软解导致花屏，已弃用）
+- [ffmpeg-kit 社区维护版 fork](https://github.com/sk3llo/ffmpeg-kit-flutter)（`com.antonkarpenko:ffmpeg-kit-min`，官方 ffmpeg-kit 已归档）：min 包（约省 60MB native lib）内置 libavcodec 原生 h264/hevc 软解 + MediaCodec 硬解，剪辑走 `-c copy` 不需要编解码器；早年"min 包 HEVC 花屏"实为 limited-range 直出 JPEG 的颜色范围 bug，已由抽帧链的 `out_range=pc` 修复
 - 存储访问双管线：优先"所有文件"权限 + 直接文件路径读写；未授权自动退回 SAF（`saf:` 协议）
   - 直路径是推荐方式：`saf:` 只写描述符上 `-movflags +faststart` 收尾回移数据不可靠，部分设备产出缺 moov 的坏 MP4（表现为"输出校验失败 moov atom not found"），终检会拦截并回滚原文件
 - DataStore 参数记忆、前台 Service（dataSync）串行队列
