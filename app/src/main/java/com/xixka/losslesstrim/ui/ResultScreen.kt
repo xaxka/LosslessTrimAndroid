@@ -1,6 +1,7 @@
 package com.xixka.losslesstrim.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -13,16 +14,17 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -60,34 +62,43 @@ fun ResultScreen(
             .fillMaxSize()
             .padding(horizontal = 16.dp)
     ) {
-        // 居中大图标 + 结论
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .padding(vertical = 20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            val allOk = failed == 0 && skipped == 0 && cancelled == 0
-            val (icon, tint) = when {
-                failed > 0 -> Icons.Default.Info to BlExt.error
-                skipped + cancelled > 0 -> Icons.Default.Info to BlExt.warning
-                else -> Icons.Default.CheckCircle to BlExt.success
+        // 顶部：左上角返回图标（叠在状态大图标同一高度内，不额外占行），
+        // 取代原底部“返回主页”文字按钮——腾出的空间让给下方明细列表
+        Box(Modifier.fillMaxWidth()) {
+            IconButton(
+                onClick = onBackHome,
+                modifier = Modifier.align(Alignment.TopStart),
+            ) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回主页")
             }
-            Icon(
-                imageVector = if (allOk) Icons.Default.CheckCircle else icon,
-                contentDescription = null,
-                tint = if (allOk) BlExt.success else tint,
-                modifier = Modifier.size(56.dp),
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                when {
-                    allOk -> "全部完成"
-                    failed > 0 -> "部分失败"
-                    else -> "完成（含跳过）"
-                },
-                style = MaterialTheme.typography.titleLarge,
-            )
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                val allOk = failed == 0 && skipped == 0 && cancelled == 0
+                val (icon, tint) = when {
+                    failed > 0 -> Icons.Default.Info to BlExt.error
+                    skipped + cancelled > 0 -> Icons.Default.Info to BlExt.warning
+                    else -> Icons.Default.CheckCircle to BlExt.success
+                }
+                Icon(
+                    imageVector = if (allOk) Icons.Default.CheckCircle else icon,
+                    contentDescription = null,
+                    tint = if (allOk) BlExt.success else tint,
+                    modifier = Modifier.size(56.dp),
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    when {
+                        allOk -> "全部完成"
+                        failed > 0 -> "部分失败"
+                        else -> "完成（含跳过）"
+                    },
+                    style = MaterialTheme.typography.titleLarge,
+                )
+            }
         }
 
         // 三列统计卡
@@ -118,25 +129,25 @@ fun ResultScreen(
                 color = BlExt.success,
             )
         }
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            modifier = Modifier.padding(vertical = 12.dp),
-        ) {
-            // 可重试 = 失败/取消 且非单文件（单文件无目录权限，需回主页重新另存为）
-            val hasRetryable = results.any {
-                (it.outcome == Outcome.FAILED || it.outcome == Outcome.CANCELLED) &&
-                        !it.entry.isSingleFile
-            }
-            if (hasRetryable) {
-                Button(onClick = onRetry) { Text("重试失败项") }
-            } else if (failed + cancelled > 0) {
-                Text(
-                    "失败项为单文件模式，请返回主页重新选择另存目标",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = BlExt.textSecondary,
-                )
-            }
-            BlTextButton(onClick = onBackHome) { Text("返回主页") }
+        // 重试（唯一保留的操作行；返回主页改由左上角图标承担）
+        val hasRetryable = results.any {
+            (it.outcome == Outcome.FAILED || it.outcome == Outcome.CANCELLED) &&
+                    !it.entry.isSingleFile
+        }
+        if (hasRetryable) {
+            Button(
+                onClick = onRetry,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 12.dp),
+            ) { Text("重试失败项") }
+        } else if (failed + cancelled > 0) {
+            Text(
+                "失败项为单文件模式，请点左上角返回后重新选择另存目标",
+                style = MaterialTheme.typography.labelSmall,
+                color = BlExt.textSecondary,
+                modifier = Modifier.padding(vertical = 12.dp),
+            )
         }
 
         // 明细列表（白卡 + 分隔线）

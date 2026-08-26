@@ -65,6 +65,7 @@ object TrimController {
         val intent = Intent(context, TrimService::class.java).setAction(TrimService.ACTION_START)
         return try {
             ContextCompat.startForegroundService(context, intent)
+            releaseUiCachesForBatch()
             true
         } catch (e: Exception) {
             synchronized(lock) {
@@ -74,6 +75,23 @@ object TrimController {
             }
             false
         }
+    }
+
+    /**
+     * 队列启动即释放 UI 层可重建缓存（缩略图 memCache / 扫描·探测 L1 / 会话日志）。
+     *
+     * 批处理期间主页与分析页不可见，这些缓存纯白占内存；前台服务一跑几十分钟，
+     * 进程常驻内存每多 10MB，LMK 杀掉的后台应用（音乐/IM/浏览器）就多一批。
+     * 磁盘层（Room probe L2、关键帧 L2、缩略图 JPEG）保留——回主页重扫、列表
+     * 出图仍秒级；正在运行的 ffmpeg 会话缓冲不受影响（各 onTrimMemory 均不触
+     * 活动会话）。单个模块异常不拖累启动主路径。
+     */
+    private fun releaseUiCachesForBatch() {
+        val low = android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW
+        try { com.xixka.losslesstrim.util.ThumbStore.onTrimMemory(low) } catch (_: Exception) {}
+        try { com.xixka.losslesstrim.data.Scanner.onTrimMemory(low) } catch (_: Exception) {}
+        try { com.xixka.losslesstrim.ffmpeg.Probe.onTrimMemory(low) } catch (_: Exception) {}
+        try { com.xixka.losslesstrim.ffmpeg.SessionBridge.onTrimMemory(low) } catch (_: Exception) {}
     }
 
     /**

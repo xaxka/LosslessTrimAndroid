@@ -150,14 +150,8 @@ object MediaCodecThumb {
     /**
      * 直解抽帧：解码 timeMs 处最近的一帧，缩到 maxPx 内返回 Bitmap；失败返回 null。
      * 阻塞调用（同步 MediaCodec），须在 IO 线程执行。
-     *
-     * @param approximate 近似模式（列表片尾缩略图用）：直接取 seek 落点的关键帧本身，
-     * 不再从关键帧向前解码到精确目标。实测 4K 10-bit HEVC 长 GOP（250 帧）精确
-     * 解码要 ~4s/张，近似模式 I 帧零前向解码 ~0.3s/张；且 seek 天然 EOF 安全
-     * （越界目标也只会落在最后一个关键帧上）。无损剪辑本就切在关键帧边界，
-     * “终点前最后一个关键帧”作为片尾缩略图语义反而更贴切。
      */
-    fun extract(context: Context, uri: Uri, timeMs: Long, maxPx: Int, approximate: Boolean = false): Bitmap? {
+    fun extract(context: Context, uri: Uri, timeMs: Long, maxPx: Int): Bitmap? {
         val t0 = System.nanoTime()
         val run = Run(uri.toString(), timeMs)
         var extractor: MediaExtractor? = null
@@ -220,12 +214,6 @@ object MediaCodecThumb {
             if (durationUs > 0) targetUs = targetUs.coerceAtMost((durationUs - 20_000L).coerceAtLeast(0L))
             val tolUs = 500_000L / fps
             extractor.seekTo(targetUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
-            if (approximate) {
-                // 近似模式：以 seek 实际落点的关键帧为目标——解码循环在第一帧
-                // 输出即 reachTarget 命中停止，I 帧零前向解码
-                val syncUs = extractor.sampleTime
-                if (syncUs >= 0) targetUs = syncUs
-            }
 
             // ---- 4. 按能力挑解码器（txt：查询 → 支持 Main10？→ 支持 P010？→ 8-bit？）----
             val pick = pickDecoder(mime)

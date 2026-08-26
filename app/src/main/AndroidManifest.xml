@@ -15,10 +15,13 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
 
+    <!-- 不设 android:largeHeap：它是修"全尺寸帧 OOM"时代（33MB/张）的兜底，真根因
+         （小图化 / 双层缓存 / 磁盘溢写 / 会话历史压缩）早已落地。保留它只会让
+         ART 堆上限翻倍，长批处理期间进程可膨胀数百 MB，挤占系统内存 →
+         LMK 杀掉用户的后台应用（音乐/IM/浏览器）。 -->
     <application
         android:name=".MainApplication"
         android:allowBackup="true"
-        android:largeHeap="true"
         android:requestLegacyExternalStorage="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"

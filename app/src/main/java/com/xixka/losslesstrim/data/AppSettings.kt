@@ -19,13 +19,6 @@ enum class TrimMode { HEAD_TAIL, INTERVAL }
 enum class AlignStrategy { CUT_MORE, CUT_LESS, AUTO }   // 多切 / 少切 / 自动
 enum class OutputContainer { KEEP, MP4, MKV }
 
-/**
- * 列表缩略图抽取时间点：片头（首帧）/片尾（计划终点帧）。
- * 默认片头以快速预览文件本身；选片尾可直观反映裁剪后的结尾画面，
- * 裁剪参数变动后缩略图随 requestedEnd 重抽（key 含 timeMs）。
- */
-enum class ThumbSource { START, END }
-
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
 data class AppSettings(
@@ -53,10 +46,6 @@ data class AppSettings(
      * 与 [hwDecodeThumbs] 互斥；旧数据两个都为 true 时 ThumbStore 优先本项。
      */
     val mcDecodeThumbs: Boolean = false,
-    /**
-     * 批量列表缩略图抽取位置：片头（默认）/片尾。选片尾时随裁剪参数重抽。
-     */
-    val batchThumbSource: ThumbSource = ThumbSource.START,
 )
 
 class SettingsRepository(private val context: Context) {
@@ -71,8 +60,6 @@ class SettingsRepository(private val context: Context) {
         val CONFIRMED = booleanPreferencesKey("overwrite_confirmed")
         val HW_THUMBS = booleanPreferencesKey("hw_decode_thumbs")
         val MC_THUMBS = booleanPreferencesKey("mc_decode_thumbs")
-        /** 批量缩略图抽取位置（START/END 枚举序号） */
-        val BATCH_THUMB_SOURCE = intPreferencesKey("batch_thumb_source")
         /** 每文件覆盖设置（含丢弃轨道）整体序列化为一个 JSON 串 */
         val OVERRIDES = stringPreferencesKey("per_file_overrides")
     }
@@ -87,7 +74,6 @@ class SettingsRepository(private val context: Context) {
             overwriteConfirmed = p[Keys.CONFIRMED] ?: false,
             hwDecodeThumbs = p[Keys.HW_THUMBS] ?: false,
             mcDecodeThumbs = p[Keys.MC_THUMBS] ?: false,
-            batchThumbSource = p[Keys.BATCH_THUMB_SOURCE]?.let { ThumbSource.entries.getOrNull(it) } ?: ThumbSource.START,
         )
     }
 
@@ -118,7 +104,6 @@ class SettingsRepository(private val context: Context) {
                 overwriteConfirmed = p[Keys.CONFIRMED] ?: false,
                 hwDecodeThumbs = p[Keys.HW_THUMBS] ?: false,
                 mcDecodeThumbs = p[Keys.MC_THUMBS] ?: false,
-                batchThumbSource = p[Keys.BATCH_THUMB_SOURCE]?.let { ThumbSource.entries.getOrNull(it) } ?: ThumbSource.START,
             )
             val next = transform(cur)
             p[Keys.MODE] = next.mode.ordinal
@@ -129,7 +114,6 @@ class SettingsRepository(private val context: Context) {
             p[Keys.CONFIRMED] = next.overwriteConfirmed
             p[Keys.HW_THUMBS] = next.hwDecodeThumbs
             p[Keys.MC_THUMBS] = next.mcDecodeThumbs
-            p[Keys.BATCH_THUMB_SOURCE] = next.batchThumbSource.ordinal
         }
     }
 }

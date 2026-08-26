@@ -57,7 +57,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import com.xixka.losslesstrim.data.ThumbSource
 import com.xixka.losslesstrim.data.TrimMode
 import com.xixka.losslesstrim.data.VideoEntry
 import com.xixka.losslesstrim.trim.TrimController
@@ -226,7 +225,7 @@ fun HomeScreen(
             )
         },
         bottomBar = {
-            // ---------- 底部操作栏：片头/片尾缩略图切换（左）+ 开始批量处理（右） ----------
+            // ---------- 底部操作栏：开始批量处理（通栏主按钮） ----------
             // 空状态（未选文件且不在扫描）时不占屏——空态自身已有两个大按钮引导
             if (statuses.isNotEmpty() || scanning) {
                 Surface(
@@ -239,22 +238,10 @@ fun HomeScreen(
                             .navigationBarsPadding()
                             .padding(horizontal = 16.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        // 缩略图抽取位置：片头（首帧，默认）/片尾（计划终点关键帧快照，随裁剪参数重抽）
-                        FilterChip(
-                            selected = settings.batchThumbSource == ThumbSource.START,
-                            onClick = { vm.updateSettings { it.copy(batchThumbSource = ThumbSource.START) } },
-                            label = { Text("片头") },
-                        )
-                        FilterChip(
-                            selected = settings.batchThumbSource == ThumbSource.END,
-                            onClick = { vm.updateSettings { it.copy(batchThumbSource = ThumbSource.END) } },
-                            label = { Text("片尾") },
-                        )
-                        Spacer(Modifier.weight(1f))
                         Button(
                             onClick = { tryStart() },
+                            modifier = Modifier.weight(1f),
                             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
                         ) {
                             Icon(
@@ -418,24 +405,13 @@ fun HomeScreen(
                                     .padding(vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                // 缩略图抽取位置：片头（首帧）/片尾（计划终点，先夹进文件内——
-                                // requestedEnd≈duration 会越过末帧，FFmpeg 全链空输出、
-                                // MMR 也不稳，此前片尾缩略图又慢又出不来就是它）。
-                                // approximate=取关键帧快照：只解 1 帧（~0.3s），不再
-                                // 从关键帧精确前向解码整个 GOP（4K10 长片 ~4s/张）。
-                                val endThumb = settings.batchThumbSource == ThumbSource.END
-                                val thumbMs = if (endThumb) {
-                                    val durMs = (e.probe.durationSec * 1000.0).toLong()
-                                    val endMs = (st.plan.requestedEnd * 1000.0).toLong().coerceAtLeast(0L)
-                                    endMs.coerceAtMost((durMs - 600L).coerceAtLeast(0L))
-                                } else 0L
+                                // 列表缩略图固定抽首帧（timeMs=0）：第 0 帧必是关键帧，
+                                // 无需 seek 也无需关键帧探测，秒出且 EOF 天然安全。
                                 // 10-bit 文件硬解颜色不可靠 → 不给硬解资格（ProbeResult.hwThumbEligible）
                                 VideoThumb(
                                     e.docUri,
                                     identity = e.sizeBytes.toString(),
                                     allowHw = e.probe.hwThumbEligible,
-                                    timeMs = thumbMs,
-                                    approximate = endThumb,
                                 )
                                 Spacer(Modifier.padding(6.dp))
                                 Column(Modifier.weight(1f)) {
