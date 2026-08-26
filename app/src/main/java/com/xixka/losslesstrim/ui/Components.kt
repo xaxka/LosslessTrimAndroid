@@ -1,5 +1,6 @@
 package com.xixka.losslesstrim.ui
 
+import android.graphics.Bitmap
 import android.graphics.SurfaceTexture
 import android.media.MediaPlayer
 import android.view.Surface
@@ -286,7 +287,18 @@ fun VideoThumb(
     }
 }
 
-/** 切点处抽帧预览；走 ThumbStore 缓存（同一时间点不重复抽帧、只出小图，杜绝拖动时内存暴涨） */
+/**
+ * 切点处抽帧预览；走 ThumbStore 缓存（同一时间点不重复抽帧、只出小图，杜绝拖动时内存暴涨）。
+ *
+ * 三态 UI（Loading / Loaded / Failed）：旧版只有 loaded / loading 两态，
+ * 抽帧失败时 `bmp` 保持 null、`LaunchedEffect` 跑完一次不再重跑 → UI 永远卡
+ * 在"加载中…"。改为 Failed 态后用户立刻看到"无可用帧"，能继续操作切点而不
+ * 被假"加载中"误导。EOF 边界 / markFailed 卡 60s 都不再冻结 UI。
+ *
+ * 兜底抽帧：第一次抽帧返回 null 时，若 [nearestKfSec] 非空且与 [tSec] 有别
+ * （>=0.05s 差异，避免关键帧本身就是抽帧目标的情况），退到 [nearestKfSec]
+ * 再抽一次——关键帧是 I 帧，零解码瞬间出图，比"失败"展示得体。
+ */
 @Composable
 fun FramePreview(
     uri: android.net.Uri,
@@ -301,15 +313,34 @@ fun FramePreview(
     val context = LocalContext.current
     val timeMs = (tSec * 1000.0).roundToLong()
     val key = remember(uri, timeMs, identity) { ThumbStore.keyOf(uri, timeMs, identity) }
-    var bmp by remember(uri, timeMs, identity) { mutableStateOf(ThumbStore.peek(key)) }
+    // 初值：缓存命中→Loaded；否则 Loading。null 状态机见下方 LaunchedEffect。
+    var state by remember(uri, timeMs, identity) {
+        mutableStateOf<ThumbState>(
+            ThumbStore.peek(key)?.let { ThumbState.Loaded(it) } ?: ThumbState.Loading
+        )
+    }
     LaunchedEffect(key) {
-        if (bmp == null) {
+        if (state !is ThumbState.Loaded) {
             // 拖动切点时 tSec 高频变化：先挂起 200ms，跳过中间值只抽最后一帧
             delay(200)
-            if (bmp == null) {
+            if (state !is ThumbState.Loaded) {
                 // 预览窗口按列宽自适应（fillMaxWidth + 16:9），最高密度出 384px 宽小图足够；
                 // preview=true 走独立并发池，不与首页列表缩略图抢位
-                bmp = ThumbStore.thumb(context, key, uri, timeMs, maxPx = 384, preview = true, nearestKfSec = nearestKfSec, allowHw = allowHw)
+                val bmp = ThumbStore.thumb(context, key, uri, timeMs, maxPx = 384, preview = true, nearestKfSec = nearestKfSec, allowHw = allowHw)
+                if (bmp != null) {
+                    state = ThumbState.Loaded(bmp)
+                } else {
+                    // 第一次失败：退到 nearestKfSec 再抽一次（I 帧零解码瞬间出图）
+                    val kfMs = nearestKfSec?.let { (it * 1000.0).roundToLong() }
+                    if (kfMs != null && kfMs != timeMs) {
+                        val fbKey = ThumbStore.keyOf(uri, kfMs, identity)
+                        val fb = ThumbStore.peek(fbKey)
+                            ?: ThumbStore.thumb(context, fbKey, uri, kfMs, maxPx = 384, preview = true, nearestKfSec = nearestKfSec, allowHw = allowHw)
+                        state = if (fb != null) ThumbState.Loaded(fb) else ThumbState.Failed
+                    } else {
+                        state = ThumbState.Failed
+                    }
+                }
             }
         }
     }
@@ -325,22 +356,28 @@ fun FramePreview(
                 .background(BlSurfaceVariant),
             contentAlignment = Alignment.Center,
         ) {
-            val b = bmp
-            if (b != null) {
-                Image(
-                    bitmap = b.asImageBitmap(),
+            when (val s = state) {
+                is ThumbState.Loaded -> Image(
+                    bitmap = s.bmp.asImageBitmap(),
                     contentDescription = label,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
                 )
-            } else {
-                Text("加载中…", color = BlExt.textDisabled, style = MaterialTheme.typography.labelSmall)
+                ThumbState.Loading -> Text("加载中…", color = BlExt.textDisabled, style = MaterialTheme.typography.labelSmall)
+                ThumbState.Failed -> Text("无可用帧", color = BlExt.textDisabled, style = MaterialTheme.typography.labelSmall)
             }
         }
         Spacer(Modifier.height(4.dp))
         Text(label, style = MaterialTheme.typography.labelSmall)
         Text(timeLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
     }
+}
+
+/** 切点预览三态：Loaded / Loading / Failed（区分"还在抽"与"抽不出来"） */
+private sealed interface ThumbState {
+    data object Loading : ThumbState
+    data object Failed : ThumbState
+    data class Loaded(val bmp: Bitmap) : ThumbState
 }
 
 /**

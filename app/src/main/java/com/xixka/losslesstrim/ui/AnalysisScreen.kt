@@ -276,7 +276,19 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                     // 起点预览：actualStart 是关键帧（新起点第一帧）→ 零解码瞬间出图
                     // 终点预览：actualEnd 是被剪掉的关键帧（丢弃的第一帧）→
                     //   看它前一帧 = 最后保留帧（actualEnd - 0.05，约 1 帧）
-                    val endFrameSec = (plan.actualEnd - 0.05).coerceAtLeast(plan.actualStart)
+                    //
+                    // EOF 边界兜底：tail=0（无片尾裁剪）时 actualEnd ≈ durationSec，
+                    //   actualEnd - 0.05 离文件末尾仅 ~50ms（1-3 帧）。ffmpeg input-seek
+                    //   在该位置越过最后一帧没东西可出，MMR OPTION_CLOSEST 在 HEVC 末帧
+                    //   附近也不稳，抽帧返回 null → markFailed 卡 60s，UI 永远"加载中"。
+                    //   离 EOF 0.5s 以内时回退到 actualEnd 自身（关键帧位置，安全在文件内，
+                    //   语义上是"被丢弃的第一帧"而非"最后保留帧"，差 1 帧，可接受）。
+                    val dur = entry.probe.durationSec
+                    val endFrameSec = if (plan.actualEnd >= dur - 0.5) {
+                        plan.actualEnd
+                    } else {
+                        (plan.actualEnd - 0.05).coerceAtLeast(plan.actualStart)
+                    }
                     val dS = plan.actualStart - plan.requestedStart
                     val dE = plan.actualEnd - plan.requestedEnd
                     // 10-bit 文件硬解颜色不可靠 → 两个切点预览都不给硬解资格
