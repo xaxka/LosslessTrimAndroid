@@ -338,6 +338,12 @@ object ThumbStore {
      * - **列表缩略图（preview=false）**：memCache → diskCache（健康检查）→
      *   ffmpeg 主路径（软解颜色正确）→ platform 兜底。缩略图小（128x72dp），
      *   优先保持列表渲染流畅。
+     *
+     * @param approximate 近似抽帧（列表片尾缩略图）：MediaCodec 取 seek 落点的
+     *   关键帧、FFmpeg 走 -noaccurate_seek 直接出 ≤目标的关键帧，均只解 1 帧。
+     *   解决两类慢/坏：目标≈片长（EOF）时 FFmpeg 全部重试策略空输出、以及
+     *   精确目标需从关键帧前向解码整个 GOP（4K10 长片 ~4s/张）。切点预览要
+     *   精确帧，不传此参数（默认 false）。
      */
     suspend fun thumb(
         context: Context,
@@ -348,6 +354,7 @@ object ThumbStore {
         preview: Boolean = false,
         nearestKfSec: Double? = null,
         allowHw: Boolean = true,
+        approximate: Boolean = false,
     ): Bitmap? {
         memCache.get(key)?.let { return it }
         if (isRecentlyFailed(key)) return null
@@ -374,9 +381,9 @@ object ThumbStore {
                         ?: loadFromDisk(app, key)   // 排队期间可能已被其它协程写入
                         ?: run {
                             // 实验性 MediaCodec 直解优先；失败/不健康自动回退 ffmpeg 软解
-                            tryExtractViaMediaCodec(app, key, uri, timeMs, maxPx)
+                            tryExtractViaMediaCodec(app, key, uri, timeMs, maxPx, approximate)
                                 ?.let { return@withContext it }
-                            val ffmpegBmp = extractViaFfmpeg(app, uri, timeMs, maxPx, nearestKfSec, allowHw)
+                            val ffmpegBmp = extractViaFfmpeg(app, uri, timeMs, maxPx, nearestKfSec, allowHw, approximate)
                             if (ffmpegBmp != null) {
                                 memCache.put(key, ffmpegBmp)
                                 saveToDisk(app, key, ffmpegBmp)
@@ -405,8 +412,8 @@ object ThumbStore {
             withContext(Dispatchers.IO) {
                 memCache.get(key)
                     ?: loadFromDisk(app, key)   // 排队期间可能已被其它协程写入缓存
-                    ?: run { tryExtractViaMediaCodec(app, key, uri, timeMs, maxPx) }
-                    ?: extractViaFfmpeg(app, uri, timeMs, maxPx, allowHw = allowHw)?.also { bmp ->
+                    ?: run { tryExtractViaMediaCodec(app, key, uri, timeMs, maxPx, approximate) }
+                    ?: extractViaFfmpeg(app, uri, timeMs, maxPx, allowHw = allowHw, approximate = approximate)?.also { bmp ->
                         memCache.put(key, bmp)
                         saveToDisk(app, key, bmp)
                     } ?: extractViaPlatform(app, uri, timeMs, maxPx)?.also { bmp ->
@@ -432,10 +439,10 @@ object ThumbStore {
      * ffmpeg → platform 既有链路兑底——即 txt 建议的“只有 MediaCodec 不支持/
      * 解码失败/P010 输出异常/厂商 codec bug 才 fallback 到 FFmpeg”。
      */
-    private fun tryExtractViaMediaCodec(context: Context, key: String, uri: Uri, timeMs: Long, maxPx: Int): Bitmap? {
+    private fun tryExtractViaMediaCodec(context: Context, key: String, uri: Uri, timeMs: Long, maxPx: Int, approximate: Boolean = false): Bitmap? {
         if (!mcThumbEnabled) return null
         if (isRecentlyMcFailed(key)) return null
-        val bmp = runCatching { MediaCodecThumb.extract(context, uri, timeMs, maxPx) }.getOrNull()
+        val bmp = runCatching { MediaCodecThumb.extract(context, uri, timeMs, maxPx, approximate) }.getOrNull()
         if (bmp == null) {
             markMcFailed(key)
             recordFailure(FailureRecord(
@@ -557,7 +564,7 @@ object ThumbStore {
      *
      * 单次约 80~200ms：每分析页最多两张切点抽帧 + 拖动 200ms 防抖，可接受。
      */
-    private fun extractViaFfmpeg(context: Context, uri: Uri, timeMs: Long, maxPx: Int, nearestKfSec: Double? = null, allowHw: Boolean = true): Bitmap? {
+    private fun extractViaFfmpeg(context: Context, uri: Uri, timeMs: Long, maxPx: Int, nearestKfSec: Double? = null, allowHw: Boolean = true, approximate: Boolean = false): Bitmap? {
         val path = StorageAccess.accessibleFile(context, uri)?.absolutePath ?: return null
         val outDir = File(context.cacheDir, FFMPEG_THUMB_DIR)
         if (!outDir.exists()) outDir.mkdirs()
@@ -576,6 +583,8 @@ object ThumbStore {
         //   Filtergraph 无帧输出，抽帧必然失败。
         // 硬解（设置开关）：GPU 解 HEVC 快 5-10x，但 10-bit 输出颜色可能不可靠。
         //   用户可在设置中开启，自行权衡速度与颜色准确性。
+        // 近似模式（列表片尾缩略图）：-noaccurate_seek 出 ≤ss 的关键帧，只解 1 帧
+        // 回退链（近似）：[hw-]approx → sw-input-seek → sw-out-seek
         // 回退链（有最近关键帧 + 硬解）：hw-out-seek → hw-input-seek → sw-out-seek → sw-input-seek
         // 回退链（有最近关键帧 + 软解）：sw-out-seek → sw-input-seek
         // 回退链（无关键帧 + 硬解）：hw-input-seek → hw-out-seek → sw-input-seek → sw-out-seek
@@ -604,11 +613,31 @@ object ThumbStore {
         val hwOutCmd = "$hwCommon -ss ${String.format(Locale.US, "%.3f", preSec)} -i \"$path\" " +
                 "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$hwVf\" -q:v 3 -y \"${outFile.absolutePath}\""
 
-        val firstCmd = if (nearestKfSec != null) swOutCmd else swInputCmd
+        // --- 近似模式命令（列表片尾缩略图）---
+        // -noaccurate_seek 让 input-seek 直接落在 ≤ss 的关键帧上出该帧，不解码
+        // 整个 GOP；且天然 EOF 安全（越界目标也只会落在最后一个关键帧）。
+        // 修复两类问题：目标≈片长时精确链全部空输出（诊断日志里 6 连败的根因），
+        // 以及 4K10 长 GOP 精确解码要数秒。首帧（timeMs=0）与关键帧目标两模式等价。
+        val swApproxCmd = "$swCommon -ss $ssStr -noaccurate_seek -i \"$path\" -an -sn -frames:v 1 -vf \"$swVf\" -q:v 3 -y \"${outFile.absolutePath}\""
+        val hwApproxCmd = "$hwCommon -ss $ssStr -noaccurate_seek -i \"$path\" -an -sn -frames:v 1 -vf \"$hwVf\" -q:v 3 -y \"${outFile.absolutePath}\""
+
+        val firstCmd = if (approximate) swApproxCmd else if (nearestKfSec != null) swOutCmd else swInputCmd
         // 设置页开关 × 调用方资格（10-bit 文件由 ProbeResult.hwThumbEligible 判定，硬解颜色不可靠）
         val hwDecode = hwDecodeEnabled && allowHw
         return try {
-            if (nearestKfSec != null) {
+            if (approximate) {
+                // 近似模式：关键帧一击必中，失败再退精确链（含两阶段 seek）兑底
+                if (hwDecode) {
+                    runFfmpegOnce(hwApproxCmd, path, timeMs, outFile)
+                        ?: runFfmpegOnce(swApproxCmd, path, timeMs, outFile)
+                        ?: runFfmpegOnce(swInputCmd, path, timeMs, outFile)
+                        ?: runFfmpegOnce(swOutCmd, path, timeMs, outFile)
+                } else {
+                    runFfmpegOnce(swApproxCmd, path, timeMs, outFile)
+                        ?: runFfmpegOnce(swInputCmd, path, timeMs, outFile)
+                        ?: runFfmpegOnce(swOutCmd, path, timeMs, outFile)
+                }
+            } else if (nearestKfSec != null) {
                 // 有最近关键帧：两阶段 seek 优先（output-seek 阶段 AVDiscard 跳非参考帧加速）
                 if (hwDecode) {
                     runFfmpegOnce(hwOutCmd, path, timeMs, outFile)

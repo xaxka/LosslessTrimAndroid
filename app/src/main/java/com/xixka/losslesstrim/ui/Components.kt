@@ -247,7 +247,8 @@ fun ChoiceField(
  * 视频缩略图（surfaceVariant 占位）；走 ThumbStore 全局缓存，二次进入页面秒出、不重复抽帧。
  *
  * 列表缩略图默认抽首帧（timeMs=0）；当 batchThumbSource=END 时传入 requestedEnd 对应
- * timeMs，key 含 timeMs → 切换裁剪参数后自动重抽，列表即时反映裁剪后片尾画面。
+ * timeMs（调用方已夹进文件内），key 含 timeMs → 切换裁剪参数后自动重抽。
+ * approximate=true 时走关键帧快照（列表片尾专用：不解码整个 GOP、EOF 安全）。
  */
 @Composable
 fun VideoThumb(
@@ -256,6 +257,7 @@ fun VideoThumb(
     modifier: Modifier = Modifier,
     allowHw: Boolean = true,
     timeMs: Long = 0L,
+    approximate: Boolean = false,
 ) {
     val context = LocalContext.current
     val key = remember(uri, identity, timeMs) { ThumbStore.keyOf(uri, timeMs, identity) }
@@ -263,7 +265,7 @@ fun VideoThumb(
     LaunchedEffect(key) {
         if (bmp == null) {
             // 列表缩略图显示 96x54dp，按最高密度 ~3x 出 288px 宽小图即可
-            bmp = ThumbStore.thumb(context, key, uri, timeMs = timeMs, maxPx = 288, allowHw = allowHw)
+            bmp = ThumbStore.thumb(context, key, uri, timeMs = timeMs, maxPx = 288, allowHw = allowHw, approximate = approximate)
         }
     }
     Box(

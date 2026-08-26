@@ -39,12 +39,18 @@ data class AppSettings(
     val truncateOverlong: Boolean = true,
     /** 首次覆盖确认已展示过 */
     val overwriteConfirmed: Boolean = false,
-    /** 缩略图使用硬件解码（mediacodec）：快但 10-bit HEVC 颜色可能不准 */
+    /**
+     * 缩略图硬解（设置页“缩略图解码方式”三选一中的实验项）：FFmpeg 内部走
+     * mediacodec 硬解，快 5-10 倍但 10-bit HEVC 颜色可能不可靠。
+     * 与 [mcDecodeThumbs] 互斥（设置页已改为单一三选一，选一个自动关另一个；
+     * 两个独立开关并存时用户能同时打开，语义重叠且困惑，已废弃该形态）。
+     */
     val hwDecodeThumbs: Boolean = false,
     /**
-     * 实验性：MediaCodec 直解缩略图（绕开 FFmpeg，直接用系统解码器 + 自管颜色）：
-     * 10-bit 走 P010→8bit CPU 转换，HDR 尝试请求 tone-map；失败自动回退 FFmpeg。
-     * 用于验证“硬解10bit缩略图.txt”方案可行性。
+     * 实验性：MediaCodec 直解缩略图（三选一中的另一实验项，绕开 FFmpeg，
+     * 直接用系统解码器 + 自管颜色）：10-bit 走 P010→8bit CPU 转换，HDR 尝试
+     * 请求 tone-map；失败自动回退 FFmpeg。用于验证“硬解10bit缩略图.txt”方案。
+     * 与 [hwDecodeThumbs] 互斥；旧数据两个都为 true 时 ThumbStore 优先本项。
      */
     val mcDecodeThumbs: Boolean = false,
     /**

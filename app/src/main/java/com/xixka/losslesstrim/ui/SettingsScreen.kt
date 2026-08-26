@@ -124,22 +124,34 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
 
             GroupLabel("预览")
             SectionCard(title = null) {
-                SwitchRow(
-                    title = "MediaCodec 直解缩略图（实验）",
-                    subtitle = if (settings.mcDecodeThumbs)
-                        "系统解码器直接出图：10-bit 走 P010→8bit 转换、HDR 请求 tone-map，颜色自管；失败自动回退 FFmpeg。结果可从下方诊断日志查看"
-                    else "FFmpeg 软/硬解抽帧（默认）。开启后验证 10-bit 硬解直解可行性：更快且不受 SAF 路径限制",
-                    checked = settings.mcDecodeThumbs,
-                    onChange = { v -> vm.updateSettings { it.copy(mcDecodeThumbs = v) } },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                SwitchRow(
-                    title = "缩略图硬解（实验）",
-                    subtitle = if (settings.hwDecodeThumbs)
-                        "GPU 硬解抽帧快 5-10 倍；10-bit 文件自动回软解保颜色。旧探测缓存（无像素格式）也会回软解，清缓存重扫后生效"
-                    else "软解抽帧，颜色准确（默认）",
-                    checked = settings.hwDecodeThumbs,
-                    onChange = { v -> vm.updateSettings { it.copy(hwDecodeThumbs = v) } },
+                // 三种解码方式同一时刻只允许一种生效：此前“MediaCodec 直解”和
+                // “缩略图硬解”是两个独立开关，能同时打开——直解开启时硬解只在
+                // 其 FFmpeg 回退段才起作用，叠加既无收益又让用户困惑“到底用的哪个”。
+                // 现改为单一三选一：软解（默认）/ 硬解（实验）/ 直解（实验）。
+                ChoiceField(
+                    label = "缩略图解码方式",
+                    options = listOf("FFmpeg 软解（默认）", "FFmpeg 硬解（实验）", "MediaCodec 直解（实验）"),
+                    selected = when {
+                        settings.mcDecodeThumbs -> 2
+                        settings.hwDecodeThumbs -> 1
+                        else -> 0
+                    },
+                ) { idx ->
+                    vm.updateSettings { s ->
+                        when (idx) {
+                            2 -> s.copy(mcDecodeThumbs = true, hwDecodeThumbs = false)
+                            1 -> s.copy(hwDecodeThumbs = true, mcDecodeThumbs = false)
+                            else -> s.copy(mcDecodeThumbs = false, hwDecodeThumbs = false)
+                        }
+                    }
+                }
+                Text(
+                    "三种方式互斥，切换即关闭其他。软解颜色最稳（默认）；硬解 GPU 抽帧快 5-10 倍，" +
+                            "但 10-bit 文件自动回软解保颜色（旧探测缓存需清缓存重扫后生效）；" +
+                            "直解绕开 FFmpeg 用系统解码器：10-bit 走 P010→8bit 转换、HDR 请求 tone-map，" +
+                            "失败自动回退 FFmpeg，结果可从下方诊断日志导出查看。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = BlExt.textSecondary,
                 )
             }
 

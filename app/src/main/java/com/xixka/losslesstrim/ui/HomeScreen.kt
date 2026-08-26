@@ -13,9 +13,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
@@ -24,9 +25,9 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -38,6 +39,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -223,12 +225,52 @@ fun HomeScreen(
                 },
             )
         },
-        floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { tryStart() },
-                icon = { Icon(Icons.Default.PlayArrow, contentDescription = null) },
-                text = { Text(if (isSingle) "开始剪辑" else "开始批量处理（$processable）") },
-            )
+        bottomBar = {
+            // ---------- 底部操作栏：片头/片尾缩略图切换（左）+ 开始批量处理（右） ----------
+            // 空状态（未选文件且不在扫描）时不占屏——空态自身已有两个大按钮引导
+            if (statuses.isNotEmpty() || scanning) {
+                Surface(
+                    color = MaterialTheme.colorScheme.background,
+                    tonalElevation = 3.dp,
+                ) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .navigationBarsPadding()
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        // 缩略图抽取位置：片头（首帧，默认）/片尾（计划终点关键帧快照，随裁剪参数重抽）
+                        FilterChip(
+                            selected = settings.batchThumbSource == ThumbSource.START,
+                            onClick = { vm.updateSettings { it.copy(batchThumbSource = ThumbSource.START) } },
+                            label = { Text("片头") },
+                        )
+                        FilterChip(
+                            selected = settings.batchThumbSource == ThumbSource.END,
+                            onClick = { vm.updateSettings { it.copy(batchThumbSource = ThumbSource.END) } },
+                            label = { Text("片尾") },
+                        )
+                        Spacer(Modifier.weight(1f))
+                        Button(
+                            onClick = { tryStart() },
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                        ) {
+                            Icon(
+                                Icons.Default.PlayArrow,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                if (isSingle) "开始剪辑" else "开始批量处理（$processable）",
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                }
+            }
         },
     ) { padding ->
         Column(
@@ -236,7 +278,7 @@ fun HomeScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // ---------- 模式切换 + 列表缩略图设置（片头/片尾） ----------
+            // ---------- 模式切换 ----------
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -253,20 +295,6 @@ fun HomeScreen(
                     selected = settings.mode == TrimMode.INTERVAL,
                     onClick = { vm.updateSettings { it.copy(mode = TrimMode.INTERVAL) } },
                     label = { Text("区间保留") },
-                )
-                Spacer(Modifier.weight(1f))
-                // 缩略图抽取位置：片头（首帧，默认）/片尾（随裁剪终点重抽）
-                // 调整裁剪参数后选了片尾的列表项会重抽缩略图，直观反映裁剪后结尾画面
-                Text("缩略图：", style = MaterialTheme.typography.labelMedium, color = BlExt.textSecondary)
-                FilterChip(
-                    selected = settings.batchThumbSource == ThumbSource.START,
-                    onClick = { vm.updateSettings { it.copy(batchThumbSource = ThumbSource.START) } },
-                    label = { Text("片头") },
-                )
-                FilterChip(
-                    selected = settings.batchThumbSource == ThumbSource.END,
-                    onClick = { vm.updateSettings { it.copy(batchThumbSource = ThumbSource.END) } },
-                    label = { Text("片尾") },
                 )
             }
 
@@ -390,10 +418,16 @@ fun HomeScreen(
                                     .padding(vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                // 缩略图抽取位置：片头（首帧）/片尾（计划终点帧）
-                                // 选片尾时随裁剪参数变化重抽，列表即时反映裁剪后的结尾画面
-                                val thumbMs = if (settings.batchThumbSource == ThumbSource.END) {
-                                    (st.plan.requestedEnd.coerceAtLeast(0.0) * 1000.0).toLong()
+                                // 缩略图抽取位置：片头（首帧）/片尾（计划终点，先夹进文件内——
+                                // requestedEnd≈duration 会越过末帧，FFmpeg 全链空输出、
+                                // MMR 也不稳，此前片尾缩略图又慢又出不来就是它）。
+                                // approximate=取关键帧快照：只解 1 帧（~0.3s），不再
+                                // 从关键帧精确前向解码整个 GOP（4K10 长片 ~4s/张）。
+                                val endThumb = settings.batchThumbSource == ThumbSource.END
+                                val thumbMs = if (endThumb) {
+                                    val durMs = (e.probe.durationSec * 1000.0).toLong()
+                                    val endMs = (st.plan.requestedEnd * 1000.0).toLong().coerceAtLeast(0L)
+                                    endMs.coerceAtMost((durMs - 600L).coerceAtLeast(0L))
                                 } else 0L
                                 // 10-bit 文件硬解颜色不可靠 → 不给硬解资格（ProbeResult.hwThumbEligible）
                                 VideoThumb(
@@ -401,6 +435,7 @@ fun HomeScreen(
                                     identity = e.sizeBytes.toString(),
                                     allowHw = e.probe.hwThumbEligible,
                                     timeMs = thumbMs,
+                                    approximate = endThumb,
                                 )
                                 Spacer(Modifier.padding(6.dp))
                                 Column(Modifier.weight(1f)) {
@@ -488,7 +523,6 @@ fun HomeScreen(
                         }
                     }
                 }
-                Spacer(Modifier.height(84.dp))
             }
         }
     }
