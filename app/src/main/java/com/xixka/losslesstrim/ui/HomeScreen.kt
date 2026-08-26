@@ -55,6 +55,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.xixka.losslesstrim.data.ThumbSource
 import com.xixka.losslesstrim.data.TrimMode
 import com.xixka.losslesstrim.data.VideoEntry
 import com.xixka.losslesstrim.trim.TrimController
@@ -235,12 +236,13 @@ fun HomeScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // ---------- 模式切换（FilterChip，初版布局） ----------
+            // ---------- 模式切换 + 列表缩略图设置（片头/片尾） ----------
             Row(
                 Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 FilterChip(
                     selected = settings.mode == TrimMode.HEAD_TAIL,
@@ -251,6 +253,20 @@ fun HomeScreen(
                     selected = settings.mode == TrimMode.INTERVAL,
                     onClick = { vm.updateSettings { it.copy(mode = TrimMode.INTERVAL) } },
                     label = { Text("区间保留") },
+                )
+                Spacer(Modifier.weight(1f))
+                // 缩略图抽取位置：片头（首帧，默认）/片尾（随裁剪终点重抽）
+                // 调整裁剪参数后选了片尾的列表项会重抽缩略图，直观反映裁剪后结尾画面
+                Text("缩略图：", style = MaterialTheme.typography.labelMedium, color = BlExt.textSecondary)
+                FilterChip(
+                    selected = settings.batchThumbSource == ThumbSource.START,
+                    onClick = { vm.updateSettings { it.copy(batchThumbSource = ThumbSource.START) } },
+                    label = { Text("片头") },
+                )
+                FilterChip(
+                    selected = settings.batchThumbSource == ThumbSource.END,
+                    onClick = { vm.updateSettings { it.copy(batchThumbSource = ThumbSource.END) } },
+                    label = { Text("片尾") },
                 )
             }
 
@@ -374,8 +390,18 @@ fun HomeScreen(
                                     .padding(vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
+                                // 缩略图抽取位置：片头（首帧）/片尾（计划终点帧）
+                                // 选片尾时随裁剪参数变化重抽，列表即时反映裁剪后的结尾画面
+                                val thumbMs = if (settings.batchThumbSource == ThumbSource.END) {
+                                    (st.plan.requestedEnd.coerceAtLeast(0.0) * 1000.0).toLong()
+                                } else 0L
                                 // 10-bit 文件硬解颜色不可靠 → 不给硬解资格（ProbeResult.hwThumbEligible）
-                                VideoThumb(e.docUri, identity = e.sizeBytes.toString(), allowHw = e.probe.hwThumbEligible)
+                                VideoThumb(
+                                    e.docUri,
+                                    identity = e.sizeBytes.toString(),
+                                    allowHw = e.probe.hwThumbEligible,
+                                    timeMs = thumbMs,
+                                )
                                 Spacer(Modifier.padding(6.dp))
                                 Column(Modifier.weight(1f)) {
                                     Text(
@@ -389,6 +415,19 @@ fun HomeScreen(
                                             append(Formats.clock(e.probe.durationSec))
                                             append(" · ").append(Formats.size(e.sizeBytes))
                                             append(" · ").append(e.probe.videoCodec ?: "?")
+                                            // 主视频轨分辨率（信息密度提升，列表页一眼看全）
+                                            e.probe.videoStream?.let { v ->
+                                                if (v.width != null && v.height != null) {
+                                                    append(" · ").append(v.width).append('×').append(v.height)
+                                                }
+                                            }
+                                            // 主音频轨采样率（kHz 整数）+ 比特率（如能拿到）
+                                            e.probe.audioStream?.let { a ->
+                                                a.sampleRate?.let { append(" · ").append(it / 1000).append("kHz") }
+                                                a.bitRate?.takeIf { it > 0 }?.let {
+                                                    append(" · ").append(Formats.bitrate(it))
+                                                }
+                                            }
                                         },
                                         style = MaterialTheme.typography.bodySmall,
                                         color = BlExt.textSecondary,

@@ -451,6 +451,11 @@ object Probe {
             title = null,
             channels = intOrNull(MediaFormat.KEY_CHANNEL_COUNT),
             channelLayout = null,
+            // MediaFormat 暴露 sampleRate（KEY_SAMPLE_RATE），与 ffprobe 对齐填充
+            sampleRate = intOrNull(MediaFormat.KEY_SAMPLE_RATE),
+            // 平台 API 不直接暴露比特率（MediaMetadataRetriever 有但需开 MMR 实例，
+            // 此处保持 null，列表展示兜底为 "—"，详尽信息走 ffprobe 严格路径）
+            bitRate = null,
             width = intOrNull(MediaFormat.KEY_WIDTH),
             height = intOrNull(MediaFormat.KEY_HEIGHT),
             attachedPic = false,
@@ -753,6 +758,9 @@ object Probe {
                         title = tags?.optString("title")?.takeIf { it.isNotEmpty() },
                         channels = if (s.has("channels")) s.optInt("channels") else null,
                         channelLayout = s.optString("channel_layout").takeIf { it.isNotEmpty() },
+                        sampleRate = if (s.has("sample_rate")) s.optInt("sample_rate") else null,
+                        // bit_rate 字符串形态：部分容器/流型缺失或返回 "N/A"，统一兜底为 null
+                        bitRate = s.optString("bit_rate").takeIf { it.isNotEmpty() }?.toLongOrNull(),
                         width = if (s.has("width")) s.optInt("width") else null,
                         height = if (s.has("height")) s.optInt("height") else null,
                         attachedPic = (disp?.optInt("attached_pic", 0) ?: 0) == 1,

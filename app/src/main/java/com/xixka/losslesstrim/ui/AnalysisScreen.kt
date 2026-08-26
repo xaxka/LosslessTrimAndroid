@@ -35,6 +35,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -58,6 +59,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -119,6 +121,9 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
     var startText by remember { mutableStateOf(initIntervalText(savedOverride?.intervalStartSec ?: -1.0)) }
     var endText by remember { mutableStateOf(initIntervalText(savedOverride?.intervalEndSec ?: -1.0)) }
     var dropped by remember { mutableStateOf(savedOverride?.droppedStreams ?: emptySet<Int>()) }
+    // 默认音轨/字幕轨（全局流索引）。null = 未选（音频兑底随首保留轨，字幕不设默认）
+    var defaultAudioIdx by remember { mutableStateOf(savedOverride?.defaultAudioIndex) }
+    var defaultSubIdx by remember { mutableStateOf(savedOverride?.defaultSubIndex) }
 
     val head = (Formats.parseSeconds(headText) ?: 0.0).coerceAtLeast(0.0)
     val tail = (Formats.parseSeconds(tailText) ?: 0.0).coerceAtLeast(0.0)
@@ -187,10 +192,15 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                     // 头尾模式：设片头；区间模式：设开始
                     if (settings.mode == TrimMode.HEAD_TAIL) headText = fmtSec(pos.coerceIn(0.0, dur))
                     else startText = Formats.clock(pos.coerceIn(0.0, dur))
+                    // 点击设起点后让 Playhead 跳转到该位置：LosslessCut / 剪映等都走这个交互，
+                    // 便于用户继续从该位置预览设终点
+                    seekReq = (pos.coerceIn(0.0, dur) * 1000).toLong()
                 },
                 onSetEnd = { pos ->
                     if (settings.mode == TrimMode.HEAD_TAIL) tailText = fmtSec((dur - pos).coerceIn(0.0, dur))
                     else endText = Formats.clock(pos.coerceIn(0.0, dur))
+                    // 同上：设终点后 Playhead 跳转到该位置
+                    seekReq = (pos.coerceIn(0.0, dur) * 1000).toLong()
                 },
                 onPositionChange = { playheadSec = it },
                 seekRequest = seekReq,
@@ -331,8 +341,21 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
             }
 
             // ---------- 轨道 ----------
-            SectionCard(title = "轨道", subtitle = "勾选保留，默认全保留") {
+            SectionCard(
+                title = "轨道",
+                subtitle = "勾选保留；音轨/字幕可选一条默认（同类型只可一条）",
+            ) {
                 entry.probe.streams.forEach { s ->
+                    val kept = s.index !in dropped
+                    val isAudio = s.isAudio
+                    val isSubtitle = s.isSubtitle
+                    val canSetDefault = kept && (isAudio || isSubtitle)
+                    // 该轨是否为用户选中的默认轨
+                    val isDefault = when {
+                        isAudio -> defaultAudioIdx == s.index
+                        isSubtitle -> defaultSubIdx == s.index
+                        else -> false
+                    }
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
@@ -340,18 +363,91 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                             .heightIn(min = 44.dp),
                     ) {
                         Checkbox(
-                            checked = s.index !in dropped,
+                            checked = kept,
                             onCheckedChange = { checked ->
-                                dropped = if (checked) dropped - s.index else dropped + s.index
+                                if (checked) {
+                                    dropped = dropped - s.index
+                                } else {
+                                    dropped = dropped + s.index
+                                    // 丢掉的轨不能继续作为默认轨：同步清除
+                                    if (defaultAudioIdx == s.index) defaultAudioIdx = null
+                                    if (defaultSubIdx == s.index) defaultSubIdx = null
+                                }
                             },
                         )
-                        Column(Modifier.padding(start = 4.dp)) {
-                            Text(s.label(), style = MaterialTheme.typography.bodyMedium)
+                        Column(
+                            Modifier
+                                .weight(1f)
+                                .padding(start = 4.dp)
+                        ) {
+                            // 标题行：#index 类型 · 编码名 · 分辨率/声道等概要
+                            Text(
+                                s.label(),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (kept) BlExt.textPrimary else BlExt.textSecondary,
+                            )
+                            // 第二行：标题/比特率/采样率等扩展属性（有则展示，无则不占行）
+                            val extras = buildList {
+                                s.title?.let { add("标题：$it") }
+                                if (s.isAudio) {
+                                    s.bitRate?.takeIf { it > 0 }?.let {
+                                        add("比特率：${Formats.bitrate(it)}")
+                                    }
+                                    s.sampleRate?.let { add("采样率：${it / 1000.0} kHz") }
+                                }
+                                if (s.isVideo && s.width != null && s.height != null) {
+                                    add("分辨率：${s.width}×${s.height}")
+                                }
+                                if (s.isSubtitle && s.width != null && s.height != null) {
+                                    // PGS/VOBSUB 等图形字幕带分辨率信息
+                                    add("分辨率：${s.width}×${s.height}")
+                                }
+                            }
+                            if (extras.isNotEmpty()) {
+                                Text(
+                                    extras.joinToString("  ·  "),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = BlExt.textSecondary,
+                                )
+                            }
                             if (s.isCover) {
                                 Text(
                                     "封面轨，勾选后原样带出",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = BlExt.textSecondary,
+                                )
+                            }
+                        }
+                        // 默认轨选择（音轨/字幕单选；丢掉的轨不可选）
+                        if (canSetDefault) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .clip(MaterialTheme.shapes.small)
+                                    .clickable {
+                                        if (isAudio) {
+                                            // 同一类型再点选中项 = 取消选中（回到兑底/不设默认）
+                                            defaultAudioIdx = if (isDefault) null else s.index
+                                        } else if (isSubtitle) {
+                                            defaultSubIdx = if (isDefault) null else s.index
+                                        }
+                                    }
+                                    .padding(start = 4.dp),
+                            ) {
+                                RadioButton(
+                                    selected = isDefault,
+                                    onClick = {
+                                        if (isAudio) {
+                                            defaultAudioIdx = if (isDefault) null else s.index
+                                        } else if (isSubtitle) {
+                                            defaultSubIdx = if (isDefault) null else s.index
+                                        }
+                                    },
+                                )
+                                Text(
+                                    if (isAudio) "默认音轨" else "默认字幕",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (isDefault) MaterialTheme.colorScheme.secondary else BlExt.textSecondary,
                                 )
                             }
                         }
@@ -380,6 +476,8 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                                 intervalStartSec = head.takeIf { it > 0.0 },
                                 intervalEndSec = (dur - tail).takeIf { tail > 0.0 && it > 0.0 },
                                 droppedStreams = dropped,
+                                defaultAudioIndex = defaultAudioIdx,
+                                defaultSubIndex = defaultSubIdx,
                             )
                         } else {
                             val endSec = if (endRaw < 0) dur else endRaw
@@ -389,6 +487,8 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                                 headSec = start.takeIf { it > 0.0 },
                                 tailSec = (dur - endSec).takeIf { endSec < dur && it > 0.0 },
                                 droppedStreams = dropped,
+                                defaultAudioIndex = defaultAudioIdx,
+                                defaultSubIndex = defaultSubIdx,
                             )
                         }
                         vm.setOverride(entry.docUri, o)
@@ -410,9 +510,9 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                 BlOutlinedButton(
                     onClick = {
                         if (settings.mode == TrimMode.HEAD_TAIL) {
-                            vm.applyHeadTailToAll(head, tail, dropped)
+                            vm.applyHeadTailToAll(head, tail, dropped, defaultAudioIdx, defaultSubIdx)
                         } else {
-                            vm.applyIntervalToAll(startRaw, endRaw, dropped)
+                            vm.applyIntervalToAll(startRaw, endRaw, dropped, defaultAudioIdx, defaultSubIdx)
                         }
                         onClose()
                     },

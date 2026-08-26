@@ -345,6 +345,8 @@ object ProbeStore {
             s.title?.let { o.put("title", it) }
             s.channels?.let { o.put("channels", it) }
             s.channelLayout?.let { o.put("channelLayout", it) }
+            s.sampleRate?.let { o.put("sampleRate", it) }
+            s.bitRate?.let { o.put("bitRate", it) }
             s.width?.let { o.put("width", it) }
             s.height?.let { o.put("height", it) }
             o.put("attachedPic", s.attachedPic)
@@ -371,6 +373,10 @@ object ProbeStore {
                     title = o.optString("title").takeIf { it.isNotEmpty() },
                     channels = if (o.has("channels")) o.getInt("channels") else null,
                     channelLayout = o.optString("channelLayout").takeIf { it.isNotEmpty() },
+                    // 旧缓存行无此字段 → null（未知）
+                    sampleRate = if (o.has("sampleRate")) o.optInt("sampleRate") else null,
+                    // 旧缓存行无此字段 → null；bitRate 字符串→Long 双向兼容
+                    bitRate = if (o.has("bitRate")) o.optLong("bitRate").takeIf { it > 0 } else null,
                     width = if (o.has("width")) o.getInt("width") else null,
                     height = if (o.has("height")) o.getInt("height") else null,
                     attachedPic = o.optBoolean("attachedPic", false),

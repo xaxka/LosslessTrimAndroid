@@ -1,6 +1,7 @@
 package com.xixka.losslesstrim.data
 
 import android.net.Uri
+import com.xixka.losslesstrim.util.Formats
 
 /** 单个媒体轨道（对应 ffprobe -show_streams 的一条流） */
 
@@ -18,6 +19,8 @@ data class StreamInfo(
     val title: String?,        // tags.title
     val channels: Int?,        // 音频声道数
     val channelLayout: String?,
+    val sampleRate: Int?,      // 音频采样率（Hz），ffprobe stream.sample_rate
+    val bitRate: Long?,        // 流比特率（bps），ffprobe stream.bit_rate；部分容器/流型无此字段
     val width: Int?,
     val height: Int?,
     val attachedPic: Boolean,  // 封面图轨
@@ -52,7 +55,10 @@ data class StreamInfo(
     val isDolbyVision: Boolean
         get() = codecName in DV_CODEC_NAMES || codecTag in DV_CODEC_TAGS
 
-    /** 轨道列表展示文本 */
+    /**
+     * 轨道列表展示文本（单行精简版）：用于卡片摘要、旧缩略列表等紧凑场景。
+     * 完整结构化属性（标题/比特率/采样率）由 AnalysisScreen 轨道卡片按需展开渲染。
+     */
     fun label(): String {
         val type = when {
             isCover -> "封面"
@@ -76,6 +82,8 @@ data class StreamInfo(
                         else -> " ${channels}声道"
                     }
                 )
+                if (sampleRate != null) append(" ${sampleRate / 1000}kHz")
+                if (bitRate != null && bitRate > 0) append(" ${Formats.bitrate(bitRate)}")
             }
             else -> codecName
         }
@@ -98,6 +106,14 @@ data class ProbeResult(
 ) {
     val videoCodec: String?
         get() = streams.firstOrNull { it.isVideo }?.codecName
+
+    /** 主视频轨（用于列表行展示分辨率、缩略图选择等） */
+    val videoStream: StreamInfo?
+        get() = streams.firstOrNull { it.isVideo }
+
+    /** 主音频轨（用于列表行展示采样率/比特率） */
+    val audioStream: StreamInfo?
+        get() = streams.firstOrNull { it.isAudio }
 
     /**
      * 缩略图能否走硬解（mediacodec）：仅当存在视频流且**确认是 8-bit**。
@@ -130,10 +146,21 @@ data class PerFileOverride(
     val intervalStartSec: Double? = null,
     val intervalEndSec: Double? = null,
     val droppedStreams: Set<Int> = emptySet(),
+    /**
+     * 用户指定的默认音轨（全局流索引）。null = 默认随第一个保留音轨（旧逻辑）。
+     * 设置后会覆盖源 disposition，其余保留音轨一律清 0，保证全片只有一条 default 音轨。
+     */
+    val defaultAudioIndex: Int? = null,
+    /**
+     * 用户指定的默认字幕轨（全局流索引）。null = 不设默认字幕（沿用源 disposition）。
+     * 设置后该字幕轨标 default，其余保留字幕轨一律清 0，避免多默认字幕互相挤兑。
+     */
+    val defaultSubIndex: Int? = null,
 ) {
     val isEmpty: Boolean
         get() = headSec == null && tailSec == null && intervalStartSec == null &&
-                intervalEndSec == null && droppedStreams.isEmpty()
+                intervalEndSec == null && droppedStreams.isEmpty() &&
+                defaultAudioIndex == null && defaultSubIndex == null
 }
 
 /** 一次剪辑计划（逻辑层，不含关键帧对齐） */

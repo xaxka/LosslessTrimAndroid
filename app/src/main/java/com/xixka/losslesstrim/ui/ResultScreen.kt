@@ -106,7 +106,12 @@ fun ResultScreen(
         }
         if (success > 0) {
             Spacer(Modifier.height(8.dp))
-            val savedStr = if (saved > 0) "，共节省 ${Formats.size(saved)}" else ""
+            // 节省比例 = 节省字节 / 原体积；原体积为 0 时（理论上不应出现）兜底跳过
+            val ratioStr = if (saved > 0 && successOrig > 0) {
+                val pct = saved.toDouble() * 100.0 / successOrig.toDouble()
+                String.format(java.util.Locale.US, "（%.1f%%）", pct)
+            } else ""
+            val savedStr = if (saved > 0) "，共节省 ${Formats.size(saved)}$ratioStr" else ""
             Text(
                 "体积：${Formats.size(successOrig)} → ${Formats.size(successNew)}$savedStr",
                 style = MaterialTheme.typography.bodyMedium,

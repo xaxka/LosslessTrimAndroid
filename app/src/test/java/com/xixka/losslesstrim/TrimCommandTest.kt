@@ -22,6 +22,7 @@ class TrimCommandTest {
     private fun stream(index: Int, type: String) = StreamInfo(
         index = index, codecType = type, codecName = "x",
         language = null, title = null, channels = null, channelLayout = null,
+        sampleRate = null, bitRate = null,
         width = null, height = null, attachedPic = false,
     )
 
@@ -148,6 +149,65 @@ class TrimCommandTest {
             streams = listOf(stream(0, "video"), stream(1, "audio")),
         )
         assertEquals("", TrimService.dispositionArgs(probe, listOf(0)))
+    }
+
+    @Test
+    fun `user selected default audio marked default`() {
+        // 用户选第 2 条音轨（index=2）为默认 → 输出侧序号 1 标 default
+        val probe = ProbeResult(
+            probeOk = true, durationSec = 60.0, formatName = "matroska",
+            streams = listOf(
+                stream(0, "video"), stream(1, "audio"), stream(2, "audio"), stream(3, "audio"),
+            ),
+        )
+        assertEquals(
+            " -disposition:a:0 0 -disposition:a:1 default -disposition:a:2 0",
+            TrimService.dispositionArgs(probe, listOf(0, 1, 2, 3), defaultAudioIndex = 2),
+        )
+    }
+
+    @Test
+    fun `default audio index not in kept falls back to first`() {
+        // 用户选第 1 条音轨（index=1）为默认，但勾掉它只留第 2/3 条 → 兑底选输出侧第 0 位
+        val probe = ProbeResult(
+            probeOk = true, durationSec = 60.0, formatName = "matroska",
+            streams = listOf(
+                stream(0, "video"), stream(1, "audio"), stream(2, "audio"), stream(3, "audio"),
+            ),
+        )
+        assertEquals(
+            " -disposition:a:0 default -disposition:a:1 0",
+            TrimService.dispositionArgs(probe, listOf(0, 2, 3), defaultAudioIndex = 1),
+        )
+    }
+
+    @Test
+    fun `default subtitle emits nothing when not specified`() {
+        val probe = ProbeResult(
+            probeOk = true, durationSec = 60.0, formatName = "matroska",
+            streams = listOf(stream(0, "video"), stream(1, "audio"), stream(2, "subtitle")),
+        )
+        // 未指定默认字幕 → 不输出字幕 disposition（沿用源 / muxer infer_no_subs）
+        assertEquals(
+            " -disposition:a:0 default",
+            TrimService.dispositionArgs(probe, listOf(0, 1, 2)),
+        )
+    }
+
+    @Test
+    fun `user selected default subtitle marked default`() {
+        // 两条保留字幕，选第 2 条（index=3）为默认 → 输出侧序号 1 标 default
+        val probe = ProbeResult(
+            probeOk = true, durationSec = 60.0, formatName = "matroska",
+            streams = listOf(
+                stream(0, "video"), stream(1, "audio"),
+                stream(2, "subtitle"), stream(3, "subtitle"),
+            ),
+        )
+        assertEquals(
+            " -disposition:a:0 default -disposition:s:0 0 -disposition:s:1 default",
+            TrimService.dispositionArgs(probe, listOf(0, 1, 2, 3), defaultSubIndex = 3),
+        )
     }
 
     // ---------- attachmentArgs / muxDelayArgs ----------

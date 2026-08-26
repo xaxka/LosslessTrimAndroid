@@ -308,32 +308,46 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         persistOverrides()
     }
 
-    /** 头尾裁剪模式：统一全部视频的片头/片尾/丢弃轨道（0 = 不裁剪/不丢），同步换算区间字段（参数互通） */
-    fun applyHeadTailToAll(head: Double, tail: Double, dropped: Set<Int> = emptySet()) =
-        applyOverrideToAll { f, it ->
-            val dur = f.probe.durationSec
-            it.copy(
-                headSec = head.takeIf { v -> v > 0.0 },
-                tailSec = tail.takeIf { v -> v > 0.0 },
-                intervalStartSec = head.takeIf { v -> v > 0.0 },
-                intervalEndSec = (dur - tail).takeIf { tail > 0.0 && it > 0.0 },
-                droppedStreams = dropped,
-            )
-        }
+    /** 头尾裁剪模式：统一全部视频的片头/片尾/丢弃轨道/默认轨（0 = 不裁剪/不丢，null = 不改默认） */
+    fun applyHeadTailToAll(
+        head: Double,
+        tail: Double,
+        dropped: Set<Int> = emptySet(),
+        defaultAudioIndex: Int? = null,
+        defaultSubIndex: Int? = null,
+    ) = applyOverrideToAll { f, it ->
+        val dur = f.probe.durationSec
+        it.copy(
+            headSec = head.takeIf { v -> v > 0.0 },
+            tailSec = tail.takeIf { v -> v > 0.0 },
+            intervalStartSec = head.takeIf { v -> v > 0.0 },
+            intervalEndSec = (dur - tail).takeIf { tail > 0.0 && it > 0.0 },
+            droppedStreams = dropped,
+            defaultAudioIndex = defaultAudioIndex,
+            defaultSubIndex = defaultSubIndex,
+        )
+    }
 
-    /** 区间模式：统一全部视频的开始/结束/丢弃轨道（-1 = 保留全片），同步换算头尾字段（参数互通） */
-    fun applyIntervalToAll(start: Double, end: Double, dropped: Set<Int> = emptySet()) =
-        applyOverrideToAll { f, it ->
-            val dur = f.probe.durationSec
-            val endSec = if (end < 0) dur else end
-            it.copy(
-                intervalStartSec = start.takeIf { v -> v >= 0.0 },
-                intervalEndSec = end.takeIf { v -> v >= 0.0 },
-                headSec = start.takeIf { v -> v > 0.0 },
-                tailSec = (dur - endSec).takeIf { endSec < dur && it > 0.0 },
-                droppedStreams = dropped,
-            )
-        }
+    /** 区间模式：统一全部视频的开始/结束/丢弃轨道/默认轨（-1 = 保留全片，null = 不改默认） */
+    fun applyIntervalToAll(
+        start: Double,
+        end: Double,
+        dropped: Set<Int> = emptySet(),
+        defaultAudioIndex: Int? = null,
+        defaultSubIndex: Int? = null,
+    ) = applyOverrideToAll { f, it ->
+        val dur = f.probe.durationSec
+        val endSec = if (end < 0) dur else end
+        it.copy(
+            intervalStartSec = start.takeIf { v -> v >= 0.0 },
+            intervalEndSec = end.takeIf { v -> v >= 0.0 },
+            headSec = start.takeIf { v -> v > 0.0 },
+            tailSec = (dur - endSec).takeIf { endSec < dur && it > 0.0 },
+            droppedStreams = dropped,
+            defaultAudioIndex = defaultAudioIndex,
+            defaultSubIndex = defaultSubIndex,
+        )
+    }
 
     fun confirmOverwrite() {
         updateSettings { it.copy(overwriteConfirmed = true) }

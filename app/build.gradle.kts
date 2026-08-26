@@ -89,12 +89,10 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
-    // 图标只用核心集（ArrowBack/PlayArrow/Settings 等都在 core 内），弃用
-    // extended（数千个图标类拖慢编译、debug 包臃肿）；Bookmark/Pause/SkipNext/
-    // SkipPrevious 等 5 个不在 core 的图标在 ui/icons/ExtendedIcons.kt 本地补齐
-    // （path 数据逐字取自 material-icons-extended 1.6.8 官方源码，几何一致）。
-    // release 构建另有 R8 收缩，未引用图标本就不会进 dex。
-    implementation("androidx.compose.material:material-icons-core")
+    // 完整 Material 图标集：分析/轨道/缩略图等场景需要的 Bookmark/Pause/
+    // SkipNext/SkipPrevious、视频质量指示等图标全在此包。release 由 R8
+    // 收缩，未引用图标不会进 dex；debug 包略大但免去本地补齐的维护负担。
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.activity:activity-compose:1.9.0")
     implementation("androidx.core:core-ktx:1.13.1")

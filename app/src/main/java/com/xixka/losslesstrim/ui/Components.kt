@@ -23,7 +23,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkBorder
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
@@ -60,11 +65,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import com.xixka.losslesstrim.ui.icons.Bookmark
-import com.xixka.losslesstrim.ui.icons.BookmarkBorder
-import com.xixka.losslesstrim.ui.icons.Pause
-import com.xixka.losslesstrim.ui.icons.SkipNext
-import com.xixka.losslesstrim.ui.icons.SkipPrevious
 import com.xixka.losslesstrim.ui.theme.BlExt
 import com.xixka.losslesstrim.ui.theme.BlMono
 import com.xixka.losslesstrim.ui.theme.BlSurfaceVariant
@@ -242,21 +242,27 @@ fun ChoiceField(
     }
 }
 
-/** 视频缩略图（surfaceVariant 占位）；走 ThumbStore 全局缓存，二次进入页面秒出、不重复抽帧 */
+/**
+ * 视频缩略图（surfaceVariant 占位）；走 ThumbStore 全局缓存，二次进入页面秒出、不重复抽帧。
+ *
+ * 列表缩略图默认抽首帧（timeMs=0）；当 batchThumbSource=END 时传入 requestedEnd 对应
+ * timeMs，key 含 timeMs → 切换裁剪参数后自动重抽，列表即时反映裁剪后片尾画面。
+ */
 @Composable
 fun VideoThumb(
     uri: android.net.Uri,
     identity: String? = null,
     modifier: Modifier = Modifier,
     allowHw: Boolean = true,
+    timeMs: Long = 0L,
 ) {
     val context = LocalContext.current
-    val key = remember(uri, identity) { ThumbStore.keyOf(uri, identity = identity) }
-    var bmp by remember(uri, identity) { mutableStateOf(ThumbStore.peek(key)) }
+    val key = remember(uri, identity, timeMs) { ThumbStore.keyOf(uri, timeMs, identity) }
+    var bmp by remember(uri, identity, timeMs) { mutableStateOf(ThumbStore.peek(key)) }
     LaunchedEffect(key) {
         if (bmp == null) {
             // 列表缩略图显示 96x54dp，按最高密度 ~3x 出 288px 宽小图即可
-            bmp = ThumbStore.thumb(context, key, uri, timeMs = 0L, maxPx = 288, allowHw = allowHw)
+            bmp = ThumbStore.thumb(context, key, uri, timeMs = timeMs, maxPx = 288, allowHw = allowHw)
         }
     }
     Box(

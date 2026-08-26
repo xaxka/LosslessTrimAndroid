@@ -60,6 +60,18 @@ object Formats {
 
     fun mb(bytes: Long): String = String.format(Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)
 
+    /** 比特率（bps） → "128 kbps" / "1.50 Mbps" / "8.20 Mbps" 等，用于轨道信息展示 */
+    fun bitrate(bps: Long): String {
+        if (bps <= 0) return "?"
+        val kbps = bps / 1000.0
+        val mbps = kbps / 1000.0
+        return when {
+            mbps >= 1 -> String.format(Locale.US, "%.2f Mbps", mbps)
+            kbps >= 1 -> String.format(Locale.US, "%.0f kbps", kbps)
+            else -> "$bps bps"
+        }
+    }
+
     /** "05:30" / "-1" / "330" → 秒；非法返回 null。"-1" 为不切哨兵（仅裸 "-1"），其余负值/空段非法。
      *  多段输入时：分/秒必须为非负整数且 < 60（"5:70"、"1.5:30" 这类按非法处理，不再静默进位）；
      *  小时段不限上限；单段纯秒数允许小数 */

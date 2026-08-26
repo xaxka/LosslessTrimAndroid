@@ -170,24 +170,53 @@ class TrimService : Service() {
             probe.streams.any { it.isSubtitle && it.index in kept }
 
         /**
-         * 音轨 disposition 重设：把输出第一音轨标 default、其余清零。
+         * 音/字幕轨 disposition 重设。
          *
-         * 根因（实测复现）：源第一音轨带 default 标志，用户勾掉它只留第二条时，
-         * -c copy 原样继承 disposition → 成片里**没有任何** default 音轨，
-         * 依赖"选 default 轨"自动选轨逻辑的播放器（电视盒/Android TV/OEM
-         * 播放器）不选任何音轨，用户感知"剪出来没声音"。
+         * 音轨：用户可在分析页为每文件指定默认音轨（[defaultAudioIndex]，全局流索引）。
+         *  - 指定的音轨在保留集中 → 标 default；其余保留音轨清 0
+         *  - 未指定 / 指定轨被丢 → 兜底走旧逻辑：输出第一保留音轨 default、其余 0
+         *  - 无保留音轨 → 不输出任何音轨 disposition
          *
-         * 输出侧音轨序 = -map 顺序（kept 升序）中音轨的相对位置。
-         * 字幕不设 default（分享场景强制弹字幕不友好，LosslessCut 同款约定）。
+         * 字幕轨：[defaultSubIndex] 为 null（默认）时不输出字幕 disposition，沿用源
+         * disposition（与 matroska -default_mode infer_no_subs 配合，分享场景不强制
+         * 弹字幕）。用户显式指定时，输出该轨 default + 其余保留字幕 0：保证全片
+         * 只有一条 default 字幕，覆盖源可能存在的多默认字幕互相挤兑。
+         *
+         * 输出侧序号 = -map 顺序（kept 升序）中各类型流的相对位置。
          */
-        fun dispositionArgs(probe: ProbeResult, kept: List<Int>): String {
+        fun dispositionArgs(
+            probe: ProbeResult,
+            kept: List<Int>,
+            defaultAudioIndex: Int? = null,
+            defaultSubIndex: Int? = null,
+        ): String {
             val keptAudio = probe.streams
                 .filter { it.isAudio && it.index in kept }
                 .sortedBy { it.index }
-            if (keptAudio.isEmpty()) return ""
+            val keptSubs = probe.streams
+                .filter { it.isSubtitle && it.index in kept }
+                .sortedBy { it.index }
+            if (keptAudio.isEmpty() && (keptSubs.isEmpty() || defaultSubIndex == null)) return ""
             return buildString {
-                append(" -disposition:a:0 default")
-                for (i in 1 until keptAudio.size) append(" -disposition:a:").append(i).append(" 0")
+                if (keptAudio.isNotEmpty()) {
+                    // 兜底：用户未指定 / 指定轨被丢 → 默认第一保留音轨
+                    val desired = defaultAudioIndex?.let { idx ->
+                        keptAudio.indexOfFirst { it.index == idx }.takeIf { it >= 0 }
+                    } ?: 0
+                    keptAudio.forEachIndexed { i, _ ->
+                        if (i == desired) append(" -disposition:a:").append(i).append(" default")
+                        else append(" -disposition:a:").append(i).append(" 0")
+                    }
+                }
+                if (keptSubs.isNotEmpty() && defaultSubIndex != null) {
+                    val desired = keptSubs.indexOfFirst { it.index == defaultSubIndex }
+                    if (desired >= 0) {
+                        keptSubs.forEachIndexed { i, _ ->
+                            if (i == desired) append(" -disposition:s:").append(i).append(" default")
+                            else append(" -disposition:s:").append(i).append(" 0")
+                        }
+                    }
+                }
             }
         }
 
@@ -387,6 +416,8 @@ class TrimService : Service() {
             target: OutputTarget,
             probe: ProbeResult,
             clampSubtitles: Boolean = true,
+            defaultAudioIndex: Int? = null,
+            defaultSubIndex: Int? = null,
         ): String {
             val ss = seekTargetSec(plan, probe)
             val dur = (plan.actualEnd - ss).coerceAtLeast(0.001)
@@ -402,7 +433,7 @@ class TrimService : Service() {
             if (clampSubtitles && hasKeptSubtitle(probe, kept)) {
                 sb.append(" -bsf:s ").append(subtitleClampBsf(dur))
             }
-            sb.append(dispositionArgs(probe, kept))
+            sb.append(dispositionArgs(probe, kept, defaultAudioIndex, defaultSubIndex))
             sb.append(muxDelayArgs(target))
             sb.append(matroskaFlagsArgs(target))
             if (target.muxer == "mp4") sb.append(" -movflags +faststart+use_metadata_tags")
@@ -619,13 +650,17 @@ class TrimService : Service() {
         if (kept.isEmpty()) {
             return FileResult(entry, plan, Outcome.FAILED, entry.sizeBytes, reason = "未保留任何轨道")
         }
+        // 用户指定的默认音轨/字幕轨（全局流索引）；null 表示走兜底逻辑
+        val defAudio = job.override?.defaultAudioIndex
+        val defSub = job.override?.defaultSubIndex
 
-        // 无实际改动（全片保留、未丢轨道、容器不变且为覆盖模式）：跳过重写，
-        // 避免"未设置裁剪"的文件被无意义地删除重建（覆盖模式下原文件会被替换）
+        // 无实际改动（全片保留、未丢轨道、未改默认轨、容器不变且为覆盖模式）：
+        // 跳过重写，避免"未设置裁剪"的文件被无意义地删除重建（覆盖模式下原文件会被替换）
         if (job.outputUri == null && s.overwrite &&
             plan.actualStart <= 0.001 &&
             plan.actualEnd >= entry.probe.durationSec - 0.001 &&
-            target.ext == entry.ext && dropped.isEmpty()
+            target.ext == entry.ext && dropped.isEmpty() &&
+            defAudio == null && defSub == null
         ) {
             return FileResult(
                 entry, plan, Outcome.SKIPPED, entry.sizeBytes,
@@ -651,7 +686,7 @@ class TrimService : Service() {
                     entry, plan, Outcome.FAILED, entry.sizeBytes,
                     reason = "另存目标无法定位为本地路径（未授权或非本地存储），SAF 通道已移除"
                 )
-            val run = runTrimVerified(inParam, outFile.absolutePath, plan, kept, target, entry, idx, total)
+            val run = runTrimVerified(inParam, outFile.absolutePath, plan, kept, target, entry, idx, total, defAudio, defSub)
             val rc = run.session?.returnCode
             if (rc == null) {
                 outFile.delete()
@@ -713,7 +748,7 @@ class TrimService : Service() {
         val partFile = File(outDirFile, "$finalName.part")
         if (partFile.exists()) partFile.delete()
 
-        val run = runTrimVerified(inParam, partFile.absolutePath, plan, kept, target, entry, idx, total)
+        val run = runTrimVerified(inParam, partFile.absolutePath, plan, kept, target, entry, idx, total, defAudio, defSub)
         val session = run.session
 
         val rc = session?.returnCode
@@ -873,12 +908,14 @@ class TrimService : Service() {
         entry: VideoEntry,
         idx: Int,
         total: Int,
+        defaultAudioIndex: Int? = null,
+        defaultSubIndex: Int? = null,
     ): TrimRun {
         val durSec = plan.duration
         val useBsf = hasKeptSubtitle(entry.probe, kept)
 
         suspend fun once(clampSubtitles: Boolean): TrimRun {
-            val cmd = buildCommand(inParam, outParam, plan, kept, target, entry, clampSubtitles)
+            val cmd = buildCommand(inParam, outParam, plan, kept, target, entry, clampSubtitles, defaultAudioIndex, defaultSubIndex)
             val session = runFfmpeg(cmd) { timeMs, speed ->
                 val p = (timeMs / 1000.0 / durSec).toFloat().coerceIn(0f, 1f)
                 publishRunning(idx, total, entry.name, p, String.format(Locale.US, "%.1fx", speed))
@@ -953,7 +990,9 @@ class TrimService : Service() {
         target: OutputTarget,
         entry: VideoEntry,
         clampSubtitles: Boolean = true,
-    ): String = assembleCommand(inParam, outParam, plan, kept, target, entry.probe, clampSubtitles)
+        defaultAudioIndex: Int? = null,
+        defaultSubIndex: Int? = null,
+    ): String = assembleCommand(inParam, outParam, plan, kept, target, entry.probe, clampSubtitles, defaultAudioIndex, defaultSubIndex)
 
     private fun extractError(session: FFmpegSession): String {
         // 优先取 SessionBridge 定格的完整日志（会话被挤出 ffmpeg-kit 历史时
