@@ -54,8 +54,14 @@ class SyncSamples(
  */
 object Probe {
 
-    /** 关键帧缓存上限（视频条目数）：防止长时间使用 / 换多个目录后无限增长 */
-    private const val KEYFRAME_CACHE_MAX = 64
+    /**
+     * 关键帧缓存上限（视频条目数）：防止长时间使用 / 换多个目录后无限增长。
+     *
+     * 旧值 64 对长视频过度富余：一部 2 小时电影的关键帧表可达 5k+ 条目 × 8 字节
+     * ≈ 40KB，加邻域条目（同片 + 不同切点）总占用轻松上 MB；32 条上限足够覆盖
+     * 用户在同一批文件间往返分析的场景，配合 onTrimMemory 释放更稳。
+     */
+    private const val KEYFRAME_CACHE_MAX = 32
 
     /** 单次媒体信息探测超时：正常远小于 5s，超时（病态慢读/损坏文件）按失败处理防挂死 */
     private const val MEDIA_PROBE_TIMEOUT_MS = 45_000L
@@ -541,6 +547,21 @@ object Probe {
      */
     fun clearKeyframeCache() {
         keyframeCache.clear()
+    }
+
+    /**
+     * 系统内存压力回调（MainApplication.onTrimMemory 路由过来）。
+     *
+     * MODERATE 及以上：清空 keyframeCache。代价是回到分析页可能重抽一次关键帧，
+     * 但 L2 Room 还在（持久库），只是 L1 重新填一遍——比持续占住 RAM 把后台
+     * 进程顶出 LMK 便宜得多。
+     */
+    fun onTrimMemory(level: Int) {
+        when {
+            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_MODERATE -> {
+                keyframeCache.clear()
+            }
+        }
     }
 
     /**

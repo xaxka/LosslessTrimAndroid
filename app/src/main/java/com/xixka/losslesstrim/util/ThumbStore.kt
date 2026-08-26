@@ -62,12 +62,51 @@ object ThumbStore {
     private val listSemaphore = Semaphore(2)
     private val previewSemaphore = Semaphore(2)
 
-    /** 内存缓存：maxMemory/8，限幅 [4MB, 32MB]（按 byteCount 计） */
+    /**
+     * 内存缓存：maxMemory/16，限幅 [2MB, 16MB]（按 byteCount 计）。
+     *
+     * 旧值 [4MB, 32MB] 对列表缩略图场景过度富余：单张 288x162 ARGB_8888 ≈ 187KB，
+     * 16MB 可容 80 张缩略图远超一屏可见项；占住 32MB 反而把后台音乐/IM 进程顶出 LMK
+     * 杀掉。降到 16MB 配合 onTrimMemory 主动释放，前台流畅度不变，后台被杀明显减少。
+     */
     private val memCache = object : LruCache<String, Bitmap>(
-        ((Runtime.getRuntime().maxMemory() / 8).toInt())
-            .coerceIn(4 * 1024 * 1024, 32 * 1024 * 1024)
+        ((Runtime.getRuntime().maxMemory() / 16).toInt())
+            .coerceIn(2 * 1024 * 1024, 16 * 1024 * 1024)
     ) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
+    }
+
+    /**
+     * 系统内存压力回调（MainApplication.onTrimMemory 路由过来）。
+     *
+     * 分级释放：
+     *  - RUNNING_LOW / RUNNING_CRITICAL（用户正用本应用且吃紧）：全清 memCache +
+     *    failed / mcFailed / recentFailures——重建代价低，先把 RAM 让出去；
+     *    磁盘缓存不动（盘 → 内存重读远比杀后台进程便宜）
+     *  - BACKGROUND / UI_HIDDEN（本应用进后台）：全清 memCache（反正用户看不到，
+     *    回前台从盘上重读，~50ms/张）；failed / recentFailures 留着（小，
+     *    防止回前台时坏图重试抽帧）
+     *  - MODERATE / RUNNING_MODERATE：保留 memCache（前台列表秒出比省这几 MB 更重要），
+     *    仅清 failed 老条目（过期哨兵本就失效，顺手清）
+     */
+    fun onTrimMemory(level: Int) {
+        when {
+            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> {
+                memCache.evictAll()
+                failed.evictAll()
+                mcFailed.evictAll()
+                synchronized(recentFailures) { recentFailures.clear() }
+            }
+            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_BACKGROUND -> {
+                memCache.evictAll()
+            }
+            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_MODERATE -> {
+                // 温和档：不动 memCache，只清可能已过期的 failed 老条目
+                // （下一轮抽帧时 isRecentlyFailed 会自然放过，这里清只是顺势）
+                failed.trimToSize(0)
+                mcFailed.trimToSize(0)
+            }
+        }
     }
 
     /**

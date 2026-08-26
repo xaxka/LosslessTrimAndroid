@@ -394,6 +394,26 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun lastResults(): List<FileResult> = TrimController.lastResults.value
 
+    /**
+     * VM 销毁（Activity 配置变更 / 进程未杀但 UI 退走）：主动清掉 ThumbStore 内存层，
+     * 避免配置变更瞬间一次性产生多份旧 memCache 残留（Compose 重组 + viewModel()
+     * 默认作用域绑定到 Activity，但缩略图 LruCache 是单例，无人替它响应 VM 释放）。
+     * 磁盘缓存保留——下次进入页面从盘上重读秒出，比重新抽帧便宜。
+     *
+     * 注：系统层 onTrimMemory 也覆盖此场景，但只在压力下触发；这里是用户主动
+     * 离开页面的"温和释放点"，比 LMK 更早一步。
+     */
+    override fun onCleared() {
+        super.onCleared()
+        try {
+            ThumbStore.onTrimMemory(
+                android.content.ComponentCallbacks2.TRIM_MEMORY_BACKGROUND
+            )
+        } catch (_: Exception) {
+            // 单例 release 异常不可影响 VM 销毁主路径
+        }
+    }
+
     // ---------------- 缓存管理 ----------------
 
     /**

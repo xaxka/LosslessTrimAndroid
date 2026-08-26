@@ -48,7 +48,7 @@ object Scanner {
     )
 
     /** 探测结果缓存上限（文件数）：同一会话内重扫（如处理结束后）秒回 */
-    private const val PROBE_CACHE_MAX = 128
+    private const val PROBE_CACHE_MAX = 64
 
     /**
      * 探测结果缓存：uri + 大小 + 修改时间 未变 → 视为同一文件直接复用。
@@ -174,6 +174,20 @@ object Scanner {
      */
     fun clearProbeCache() {
         probeCache.clear()
+    }
+
+    /**
+     * 系统内存压力回调（MainApplication.onTrimMemory 路由过来）。
+     *
+     * MODERATE 及以上：清空 probeCache。L2 Room（持久库）仍在，下页重进秒回，
+     * 失去的只是进程内 L1 的快路径——比 Room 慢几十毫秒但完全可接受。
+     */
+    fun onTrimMemory(level: Int) {
+        when {
+            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_MODERATE -> {
+                probeCache.clear()
+            }
+        }
     }
 
     /**

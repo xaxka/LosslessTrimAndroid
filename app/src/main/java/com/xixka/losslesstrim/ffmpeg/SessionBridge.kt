@@ -34,7 +34,7 @@ import java.util.concurrent.atomic.AtomicLong
 object SessionBridge {
 
     /** doneLogs 总字节预算（ffmpeg 会话日志仅供 extractError 取尾部几行） */
-    private const val DONE_MAX_TOTAL_CHARS = 4 * 1024 * 1024
+    private const val DONE_MAX_TOTAL_CHARS = 2 * 1024 * 1024
 
     /** 单条定格日志上限（字符）：只保留尾部——错误提取只看最后几行 */
     private const val DONE_MAX_ENTRY_CHARS = 256 * 1024
@@ -203,6 +203,32 @@ object SessionBridge {
         spills.remove(sessionId)?.let { s ->
             try { s.writer.close() } catch (_: Exception) {}
             s.delete()
+        }
+    }
+
+    /**
+     * 系统内存压力回调（MainApplication.onTrimMemory 路由过来）。
+     *
+     * 分级释放：
+     *  - RUNNING_LOW / CRITICAL：清 doneLogs（已定格日志，错误诊断用的，压力下可丢）；
+     *    正在执行的 logBuffers / spills / statHandlers 不动（会话还没完，丢了无法
+     *    回放日志或拿进度）；doneLogs 清 0 即释放 2MB 上限预算
+     *  - BACKGROUND / UI_HIDDEN：同上，doneLogs 全清
+     *  - MODERATE：只清过期的 doneLogs（ LinkedHashMap access-order 下最少用的先进
+     *    先出，对老条目）
+     */
+    fun onTrimMemory(level: Int) {
+        when {
+            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_MODERATE -> {
+                synchronized(doneLogs) {
+                    val it = doneLogs.entries.iterator()
+                    while (it.hasNext()) {
+                        val e = it.next()
+                        doneBytes.addAndGet(-e.value.length.toLong())
+                        it.remove()
+                    }
+                }
+            }
         }
     }
 
