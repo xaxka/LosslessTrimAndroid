@@ -184,13 +184,14 @@ class TrimCommandTest {
 
     @Test
     fun `unselected default follows source default audio`() {
-        // 源默认是第 2 条音轨（index=1）且在保留集中 → 未选时跟随源默认，不再强制首保留轨
+        // 源默认是第 2 条音轨（index=2，**非**首保留位）→ 未选时跟随源默认；
+        // 旧逻辑会强制 a:0 default，此用例专防该回退
         val probe = ProbeResult(
             probeOk = true, durationSec = 60.0, formatName = "matroska",
             streams = listOf(
                 stream(0, "video"),
-                stream(1, "audio", dispositionDefault = true),
-                stream(2, "audio"),
+                stream(1, "audio"),
+                stream(2, "audio", dispositionDefault = true),
             ),
         )
         assertEquals(
