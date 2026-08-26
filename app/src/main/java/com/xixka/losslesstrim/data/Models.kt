@@ -19,8 +19,10 @@ data class StreamInfo(
     val title: String?,        // tags.title
     val channels: Int?,        // 音频声道数
     val channelLayout: String?,
-    val sampleRate: Int?,      // 音频采样率（Hz），ffprobe stream.sample_rate
-    val bitRate: Long?,        // 流比特率（bps），ffprobe stream.bit_rate；部分容器/流型无此字段
+    // 默认 null：旧缓存行无此字段；同时让未关心此属性的单测用例无需显式传 null，
+    // 避免 StreamInfo 构造点批量散开（命名参数中可省略带默认值的参数）
+    val sampleRate: Int? = null,      // 音频采样率（Hz），ffprobe stream.sample_rate
+    val bitRate: Long? = null,        // 流比特率（bps），ffprobe stream.bit_rate；部分容器/流型无此字段
     val width: Int?,
     val height: Int?,
     val attachedPic: Boolean,  // 封面图轨
