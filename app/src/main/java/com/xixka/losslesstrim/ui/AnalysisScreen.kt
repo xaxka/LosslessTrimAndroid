@@ -522,17 +522,20 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                 }
             }
             // 目录模式下：把本片的剪辑参数（含丢弃轨道）应用到全部视频
-            // （两种模式均写入每视频的单独设置；默认轨是单文件语义不随行——
-            // 　各文件轨道顺序不同，同一索引跨文件指向不同内容，统一下发会张冠李戴）
+            // （两种模式均写入每视频的单独设置。丢弃轨道跨文件按**签名**匹配——
+            // 　索引是文件内位置，各文件轨道排列不同，直接下发会错丢轨；其他文件
+            // 　丢"同款轨"（编码/语言/标题相同），没有同款轨的保持不动。
+            // 　默认轨仍是单文件语义不随行，其余文件跟随各自源默认）
             if (!entry.isSingleFile) {
                 BlOutlinedButton(
                     onClick = {
-                        // 先统一下发可迁移参数（默认轨一律重置为跟随源默认），
-                        // 再把本片完整状态（含默认轨）写回——本片选择不丢，其余文件不被错设
+                        // 先统一下发可迁移参数（丢弃轨按签名换算到各文件，默认轨
+                        // 一律重置为跟随源默认），再把本片完整状态（含精确索引与
+                        // 默认轨）写回——本片选择不丢，其余文件不被错设
                         if (settings.mode == TrimMode.HEAD_TAIL) {
-                            vm.applyHeadTailToAll(head, tail, dropped)
+                            vm.applyHeadTailToAll(head, tail, entry, dropped)
                         } else {
-                            vm.applyIntervalToAll(startRaw, endRaw, dropped)
+                            vm.applyIntervalToAll(startRaw, endRaw, entry, dropped)
                         }
                         vm.setOverride(entry.docUri, buildOverride())
                         onClose()
@@ -541,7 +544,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                     enabled = plan.ok,
                 ) { Text("应用到全部视频") }
                 Text(
-                    "默认轨不随本操作下发（各文件轨道顺序不同）；其余文件跟随各自源默认",
+                    "丢弃轨道按编码/语言/标题在各文件匹配同款轨（序号是文件内位置，跨文件不可比）；默认轨跟随各自源默认",
                     style = MaterialTheme.typography.labelSmall,
                     color = BlExt.textSecondary,
                 )

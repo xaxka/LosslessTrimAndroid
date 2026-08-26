@@ -98,6 +98,45 @@ data class StreamInfo(
     }
 }
 
+/**
+ * 轨道签名（类型/编码/语言/标题/声道/封面标记）：同一"逻辑轨"跨文件的身份键。
+ * 语言 null/""/und 归一为同值（ffprobe 与 MediaExtractor 对未标语言的上报不一致）。
+ */
+private fun StreamInfo.signatureKey(): String {
+    val lang = language?.takeUnless { it.isEmpty() || it == "und" } ?: ""
+    return "$codecType|$codecName|$lang|${title ?: ""}|${channels ?: ""}|$attachedPic"
+}
+
+/**
+ * 跨文件"丢弃轨道"匹配：源文件勾掉的轨按**轨道签名**在目标文件的流列表里
+ * 找同款轨，返回目标文件应丢弃的全局流索引集。
+ *
+ * 背景：全局流索引（#N）是文件内位置，各封装轨道排列不同（有的字幕在音轨前、
+ * 有的多一条评论/封面轨），同一索引跨文件指向不同内容——直接把索引下发到全部
+ * 文件会错丢轨道（用户实际遭遇："每个文件的轨道是随机的"）。
+ *
+ * 匹配语义：目标文件里与源被丢轨**同款**（如 "audio|ac3|eng|Commentary|6|false"）
+ * 的轨才被丢；没有同款轨的文件保持不动。目标文件存在多条同签名轨且源只勾掉
+ * 其一时按"全部匹配"处理——批量一致性优先（同款轨本就不可区分）。
+ *
+ * 本片自身不要走此函数：直接用精确索引（AppViewModel 调用点按 docUri 跳过），
+ * 否则源文件里另一条同签名未勾掉的轨会被误伤。
+ */
+fun matchDroppedBySignature(
+    sourceStreams: List<StreamInfo>,
+    dropped: Set<Int>,
+    targetStreams: List<StreamInfo>,
+): Set<Int> {
+    if (dropped.isEmpty()) return emptySet()
+    val sigs = sourceStreams
+        .filter { it.index in dropped }
+        .mapTo(HashSet()) { it.signatureKey() }
+    if (sigs.isEmpty()) return emptySet()
+    return targetStreams
+        .filter { it.signatureKey() in sigs }
+        .mapTo(HashSet()) { it.index }
+}
+
 /** ffprobe 解析结果 */
 data class ProbeResult(
     val probeOk: Boolean,

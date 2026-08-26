@@ -13,6 +13,7 @@ import com.xixka.losslesstrim.data.ScanProgress
 import com.xixka.losslesstrim.data.Scanner
 import com.xixka.losslesstrim.data.SettingsRepository
 import com.xixka.losslesstrim.data.VideoEntry
+import com.xixka.losslesstrim.data.matchDroppedBySignature
 import com.xixka.losslesstrim.trim.DocUtils
 import com.xixka.losslesstrim.trim.QueueUi
 import com.xixka.losslesstrim.trim.TrimController
@@ -311,13 +312,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * 头尾裁剪模式：统一全部视频的片头/片尾/丢弃轨道（0 = 不裁剪/不丢）。
      *
-     * 默认轨**不随行**：流索引是单文件语义，各文件轨道顺序不同，同一索引
-     * 跨文件指向不同内容，统一下发会张冠李戴 → 一律重置为 null（跟随各自
-     * 源默认）。当前编辑片的默认轨由调用方随后 setOverride 写回。
+     * 丢弃轨道跨文件按**签名**匹配（类型/编码/语言/标题/声道）：各文件轨道
+     * 排列不同，同一索引指向不同内容，直接下发会错丢轨；其他文件丢"同款轨"，
+     * 没有同款轨的保持不动。默认轨仍是单文件语义不随行（一律重置为跟随源
+     * 默认）；当前编辑片的完整状态由调用方随后 setOverride 写回。
      */
     fun applyHeadTailToAll(
         head: Double,
         tail: Double,
+        source: VideoEntry,
         dropped: Set<Int> = emptySet(),
     ) = applyOverrideToAll { f, it ->
         val dur = f.probe.durationSec
@@ -326,16 +329,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             tailSec = tail.takeIf { v -> v > 0.0 },
             intervalStartSec = head.takeIf { v -> v > 0.0 },
             intervalEndSec = (dur - tail).takeIf { tail > 0.0 && it > 0.0 },
-            droppedStreams = dropped,
+            droppedStreams = droppedForFile(source, dropped, f),
             defaultAudioIndex = null,
             defaultSubIndex = null,
         )
     }
 
-    /** 区间模式：统一全部视频的开始/结束/丢弃轨道（-1 = 保留全片）；默认轨不随行，同上 */
+    /** 区间模式：统一全部视频的开始/结束/丢弃轨道（-1 = 保留全片）；丢弃轨签名匹配、默认轨不随行，同上 */
     fun applyIntervalToAll(
         start: Double,
         end: Double,
+        source: VideoEntry,
         dropped: Set<Int> = emptySet(),
     ) = applyOverrideToAll { f, it ->
         val dur = f.probe.durationSec
@@ -345,11 +349,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             intervalEndSec = end.takeIf { v -> v >= 0.0 },
             headSec = start.takeIf { v -> v > 0.0 },
             tailSec = (dur - endSec).takeIf { endSec < dur && it > 0.0 },
-            droppedStreams = dropped,
+            droppedStreams = droppedForFile(source, dropped, f),
             defaultAudioIndex = null,
             defaultSubIndex = null,
         )
     }
+
+    /**
+     * 每文件应丢的轨集：本片精确按索引；其余文件按轨道签名匹配同款轨
+     * （索引是文件内位置，跨文件不可比；见 matchDroppedBySignature）。
+     */
+    private fun droppedForFile(source: VideoEntry, dropped: Set<Int>, target: VideoEntry): Set<Int> =
+        if (target.docUri == source.docUri) dropped
+        else matchDroppedBySignature(source.probe.streams, dropped, target.probe.streams)
 
     fun confirmOverwrite() {
         updateSettings { it.copy(overwriteConfirmed = true) }
