@@ -354,6 +354,7 @@ object ProbeStore {
             s.rotation?.let { o.put("rotation", it) }
             s.codecTag?.let { o.put("codecTag", it) }
             s.pixFmt?.let { o.put("pixFmt", it) }
+            s.dispositionDefault?.let { o.put("dispositionDefault", it) }
             arr.put(o)
         }
         return arr.toString()
@@ -386,6 +387,8 @@ object ProbeStore {
                     codecTag = o.optString("codecTag").takeIf { it.isNotEmpty() },
                     // 旧缓存行无此字段 → null（未知，硬解分流按保守软解处理）
                     pixFmt = o.optString("pixFmt").takeIf { it.isNotEmpty() },
+                    // 旧缓存行无此字段 → null（未知，音轨兜底按"源无默认"处理）
+                    dispositionDefault = if (o.has("dispositionDefault")) o.optBoolean("dispositionDefault") else null,
                 )
             )
         }

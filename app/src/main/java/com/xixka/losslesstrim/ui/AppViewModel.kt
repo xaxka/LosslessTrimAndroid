@@ -308,13 +308,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         persistOverrides()
     }
 
-    /** 头尾裁剪模式：统一全部视频的片头/片尾/丢弃轨道/默认轨（0 = 不裁剪/不丢，null = 不改默认） */
+    /**
+     * 头尾裁剪模式：统一全部视频的片头/片尾/丢弃轨道（0 = 不裁剪/不丢）。
+     *
+     * 默认轨**不随行**：流索引是单文件语义，各文件轨道顺序不同，同一索引
+     * 跨文件指向不同内容，统一下发会张冠李戴 → 一律重置为 null（跟随各自
+     * 源默认）。当前编辑片的默认轨由调用方随后 setOverride 写回。
+     */
     fun applyHeadTailToAll(
         head: Double,
         tail: Double,
         dropped: Set<Int> = emptySet(),
-        defaultAudioIndex: Int? = null,
-        defaultSubIndex: Int? = null,
     ) = applyOverrideToAll { f, it ->
         val dur = f.probe.durationSec
         it.copy(
@@ -323,18 +327,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             intervalStartSec = head.takeIf { v -> v > 0.0 },
             intervalEndSec = (dur - tail).takeIf { tail > 0.0 && it > 0.0 },
             droppedStreams = dropped,
-            defaultAudioIndex = defaultAudioIndex,
-            defaultSubIndex = defaultSubIndex,
+            defaultAudioIndex = null,
+            defaultSubIndex = null,
         )
     }
 
-    /** 区间模式：统一全部视频的开始/结束/丢弃轨道/默认轨（-1 = 保留全片，null = 不改默认） */
+    /** 区间模式：统一全部视频的开始/结束/丢弃轨道（-1 = 保留全片）；默认轨不随行，同上 */
     fun applyIntervalToAll(
         start: Double,
         end: Double,
         dropped: Set<Int> = emptySet(),
-        defaultAudioIndex: Int? = null,
-        defaultSubIndex: Int? = null,
     ) = applyOverrideToAll { f, it ->
         val dur = f.probe.durationSec
         val endSec = if (end < 0) dur else end
@@ -344,8 +346,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             headSec = start.takeIf { v -> v > 0.0 },
             tailSec = (dur - endSec).takeIf { endSec < dur && it > 0.0 },
             droppedStreams = dropped,
-            defaultAudioIndex = defaultAudioIndex,
-            defaultSubIndex = defaultSubIndex,
+            defaultAudioIndex = null,
+            defaultSubIndex = null,
         )
     }
 

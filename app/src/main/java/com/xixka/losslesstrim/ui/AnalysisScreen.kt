@@ -121,7 +121,8 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
     var startText by remember { mutableStateOf(initIntervalText(savedOverride?.intervalStartSec ?: -1.0)) }
     var endText by remember { mutableStateOf(initIntervalText(savedOverride?.intervalEndSec ?: -1.0)) }
     var dropped by remember { mutableStateOf(savedOverride?.droppedStreams ?: emptySet<Int>()) }
-    // 默认音轨/字幕轨（全局流索引）。null = 未选（音频兑底随首保留轨，字幕不设默认）
+    // 默认音轨/字幕轨（全局流索引，单文件语义）。null = 未选：跟随源默认轨
+    // （音频在源默认轨被丢或兜底探测未知时退回首保留轨；字幕沿用源 disposition）
     var defaultAudioIdx by remember { mutableStateOf(savedOverride?.defaultAudioIndex) }
     var defaultSubIdx by remember { mutableStateOf(savedOverride?.defaultSubIndex) }
 
@@ -355,7 +356,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
             // ---------- 轨道 ----------
             SectionCard(
                 title = "轨道",
-                subtitle = "勾选保留；音轨/字幕可选一条默认（同类型只可一条）",
+                subtitle = "勾选保留；音轨/字幕可选一条默认，未选时跟随源默认轨",
             ) {
                 entry.probe.streams.forEach { s ->
                     val kept = s.index !in dropped
@@ -400,6 +401,8 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                             )
                             // 第二行：标题/比特率/采样率等扩展属性（有则展示，无则不占行）
                             val extras = buildList {
+                                // 源文件里被标 default 的轨（未手动选默认时的跟随对象）
+                                if ((isAudio || isSubtitle) && s.dispositionDefault == true) add("源默认轨")
                                 s.title?.let { add("标题：$it") }
                                 if (s.isAudio) {
                                     s.bitRate?.takeIf { it > 0 }?.let {
@@ -476,34 +479,36 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
 
             Spacer(Modifier.height(4.dp))
 
+            // 两模式参数互通：以当前模式输入为准，换算出另一模式字段一起写入
+            // （头尾 head↔开始、片尾 tail↔结束时间按 dur 换算），切换模式数值跟随；
+            // 保存与应用到全部共用（后者先统一下发，再写回本片完整状态）
+            fun buildOverride(): PerFileOverride = if (settings.mode == TrimMode.HEAD_TAIL) {
+                PerFileOverride(
+                    headSec = head.takeIf { it > 0.0 },
+                    tailSec = tail.takeIf { it > 0.0 },
+                    intervalStartSec = head.takeIf { it > 0.0 },
+                    intervalEndSec = (dur - tail).takeIf { tail > 0.0 && it > 0.0 },
+                    droppedStreams = dropped,
+                    defaultAudioIndex = defaultAudioIdx,
+                    defaultSubIndex = defaultSubIdx,
+                )
+            } else {
+                val endSec = if (endRaw < 0) dur else endRaw
+                PerFileOverride(
+                    intervalStartSec = startRaw.takeIf { it >= 0.0 },
+                    intervalEndSec = endRaw.takeIf { it >= 0.0 },
+                    headSec = start.takeIf { it > 0.0 },
+                    tailSec = (dur - endSec).takeIf { endSec < dur && it > 0.0 },
+                    droppedStreams = dropped,
+                    defaultAudioIndex = defaultAudioIdx,
+                    defaultSubIndex = defaultSubIdx,
+                )
+            }
+
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(
                     onClick = {
-                        // 两模式参数互通：以当前模式输入为准，换算出另一模式字段一起写入
-                        // （头尾 head↔开始、片尾 tail↔结束时间按 dur 换算），切换模式数值跟随
-                        val o = if (settings.mode == TrimMode.HEAD_TAIL) {
-                            PerFileOverride(
-                                headSec = head.takeIf { it > 0.0 },
-                                tailSec = tail.takeIf { it > 0.0 },
-                                intervalStartSec = head.takeIf { it > 0.0 },
-                                intervalEndSec = (dur - tail).takeIf { tail > 0.0 && it > 0.0 },
-                                droppedStreams = dropped,
-                                defaultAudioIndex = defaultAudioIdx,
-                                defaultSubIndex = defaultSubIdx,
-                            )
-                        } else {
-                            val endSec = if (endRaw < 0) dur else endRaw
-                            PerFileOverride(
-                                intervalStartSec = startRaw.takeIf { it >= 0.0 },
-                                intervalEndSec = endRaw.takeIf { it >= 0.0 },
-                                headSec = start.takeIf { it > 0.0 },
-                                tailSec = (dur - endSec).takeIf { endSec < dur && it > 0.0 },
-                                droppedStreams = dropped,
-                                defaultAudioIndex = defaultAudioIdx,
-                                defaultSubIndex = defaultSubIdx,
-                            )
-                        }
-                        vm.setOverride(entry.docUri, o)
+                        vm.setOverride(entry.docUri, buildOverride())
                         onClose()
                     },
                     enabled = plan.ok,
@@ -517,20 +522,29 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                 }
             }
             // 目录模式下：把本片的剪辑参数（含丢弃轨道）应用到全部视频
-            // （两种模式均写入每视频的单独设置，轨道勾选同步下发）
+            // （两种模式均写入每视频的单独设置；默认轨是单文件语义不随行——
+            // 　各文件轨道顺序不同，同一索引跨文件指向不同内容，统一下发会张冠李戴）
             if (!entry.isSingleFile) {
                 BlOutlinedButton(
                     onClick = {
+                        // 先统一下发可迁移参数（默认轨一律重置为跟随源默认），
+                        // 再把本片完整状态（含默认轨）写回——本片选择不丢，其余文件不被错设
                         if (settings.mode == TrimMode.HEAD_TAIL) {
-                            vm.applyHeadTailToAll(head, tail, dropped, defaultAudioIdx, defaultSubIdx)
+                            vm.applyHeadTailToAll(head, tail, dropped)
                         } else {
-                            vm.applyIntervalToAll(startRaw, endRaw, dropped, defaultAudioIdx, defaultSubIdx)
+                            vm.applyIntervalToAll(startRaw, endRaw, dropped)
                         }
+                        vm.setOverride(entry.docUri, buildOverride())
                         onClose()
                     },
                     modifier = Modifier.fillMaxWidth(),
                     enabled = plan.ok,
                 ) { Text("应用到全部视频") }
+                Text(
+                    "默认轨不随本操作下发（各文件轨道顺序不同）；其余文件跟随各自源默认",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = BlExt.textSecondary,
+                )
             }
             Spacer(Modifier.height(24.dp))
         }

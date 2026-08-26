@@ -40,6 +40,10 @@ data class StreamInfo(
     // null=未知（platform 兜底探测 / 旧缓存行）。10-bit 判定的依据：
     // mediacodec 硬解 10-bit HEVC 的缩略图颜色不可靠 → 自动走软解
     val pixFmt: String? = null,
+    // ffprobe disposition.default：该轨在源文件里是否被标记为默认轨。
+    // null=未知（平台 MediaExtractor 兜底拿不到 / 旧缓存行）——音轨兜底
+    // 逻辑按"源无默认"处理（首保留轨标 default，防丢默认轨后播放器无声）
+    val dispositionDefault: Boolean? = null,
 ) {
     val isVideo: Boolean get() = codecType == "video" && !attachedPic
     val isAudio: Boolean get() = codecType == "audio"
@@ -149,13 +153,17 @@ data class PerFileOverride(
     val intervalEndSec: Double? = null,
     val droppedStreams: Set<Int> = emptySet(),
     /**
-     * 用户指定的默认音轨（全局流索引）。null = 默认随第一个保留音轨（旧逻辑）。
+     * 用户指定的默认音轨（全局流索引）。null = 跟随源默认音轨（源 disposition.default；
+     * 源默认轨被丢或兜底探测未知时退回首保留音轨，防丢默认轨后播放器无声）。
      * 设置后会覆盖源 disposition，其余保留音轨一律清 0，保证全片只有一条 default 音轨。
      */
     val defaultAudioIndex: Int? = null,
     /**
      * 用户指定的默认字幕轨（全局流索引）。null = 不设默认字幕（沿用源 disposition）。
      * 设置后该字幕轨标 default，其余保留字幕轨一律清 0，避免多默认字幕互相挤兑。
+     *
+     * 注意：两条默认轨索引均为**单文件语义**——各文件轨道顺序不同，同一索引
+     * 跨文件指向不同内容，禁止随"应用到全部"统一下发（见 AppViewModel.applyOverrideToAll）。
      */
     val defaultSubIndex: Int? = null,
 ) {

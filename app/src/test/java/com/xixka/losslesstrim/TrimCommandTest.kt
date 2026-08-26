@@ -19,11 +19,12 @@ import org.junit.Test
  */
 class TrimCommandTest {
 
-    private fun stream(index: Int, type: String) = StreamInfo(
+    private fun stream(index: Int, type: String, dispositionDefault: Boolean? = null) = StreamInfo(
         index = index, codecType = type, codecName = "x",
         language = null, title = null, channels = null, channelLayout = null,
         sampleRate = null, bitRate = null,
         width = null, height = null, attachedPic = false,
+        dispositionDefault = dispositionDefault,
     )
 
     // ---------- seekArgs ----------
@@ -178,6 +179,75 @@ class TrimCommandTest {
         assertEquals(
             " -disposition:a:0 default -disposition:a:1 0",
             TrimService.dispositionArgs(probe, listOf(0, 2, 3), defaultAudioIndex = 1),
+        )
+    }
+
+    @Test
+    fun `unselected default follows source default audio`() {
+        // 源默认是第 2 条音轨（index=1）且在保留集中 → 未选时跟随源默认，不再强制首保留轨
+        val probe = ProbeResult(
+            probeOk = true, durationSec = 60.0, formatName = "matroska",
+            streams = listOf(
+                stream(0, "video"),
+                stream(1, "audio", dispositionDefault = true),
+                stream(2, "audio"),
+            ),
+        )
+        assertEquals(
+            " -disposition:a:0 0 -disposition:a:1 default",
+            TrimService.dispositionArgs(probe, listOf(0, 1, 2)),
+        )
+    }
+
+    @Test
+    fun `source default audio dropped falls back to first kept`() {
+        // 源默认音轨（index=1）被用户勾掉 → 兑底首保留音轨（防丢默认轨后播放器无声）
+        val probe = ProbeResult(
+            probeOk = true, durationSec = 60.0, formatName = "matroska",
+            streams = listOf(
+                stream(0, "video"),
+                stream(1, "audio", dispositionDefault = true),
+                stream(2, "audio"),
+            ),
+        )
+        assertEquals(
+            " -disposition:a:0 default",
+            TrimService.dispositionArgs(probe, listOf(0, 2)),
+        )
+    }
+
+    @Test
+    fun `second source default used when first dropped`() {
+        // 源两条默认音轨，第一条被丢 → 取保留集中第一条源默认（index=2，输出侧第 0 位）
+        val probe = ProbeResult(
+            probeOk = true, durationSec = 60.0, formatName = "matroska",
+            streams = listOf(
+                stream(0, "video"),
+                stream(1, "audio", dispositionDefault = true),
+                stream(2, "audio", dispositionDefault = true),
+                stream(3, "audio"),
+            ),
+        )
+        assertEquals(
+            " -disposition:a:0 default -disposition:a:1 0",
+            TrimService.dispositionArgs(probe, listOf(0, 2, 3)),
+        )
+    }
+
+    @Test
+    fun `user selection overrides source default audio`() {
+        // 源默认 index=1，用户显式选 index=2 → 用户选择优先
+        val probe = ProbeResult(
+            probeOk = true, durationSec = 60.0, formatName = "matroska",
+            streams = listOf(
+                stream(0, "video"),
+                stream(1, "audio", dispositionDefault = true),
+                stream(2, "audio"),
+            ),
+        )
+        assertEquals(
+            " -disposition:a:0 0 -disposition:a:1 default",
+            TrimService.dispositionArgs(probe, listOf(0, 1, 2), defaultAudioIndex = 2),
         )
     }
 

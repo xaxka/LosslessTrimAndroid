@@ -785,6 +785,9 @@ object Probe {
                         width = if (s.has("width")) s.optInt("width") else null,
                         height = if (s.has("height")) s.optInt("height") else null,
                         attachedPic = (disp?.optInt("attached_pic", 0) ?: 0) == 1,
+                        // disposition.default（源文件标记的默认轨）；disp 对象缺失 → null（未知），
+                        // 音轨兜底逻辑按"源无默认"处理（首保留轨标 default）
+                        dispositionDefault = disp?.optInt("default")?.let { it == 1 },
                         hasBFrames = if (s.has("has_b_frames")) s.optInt("has_b_frames") else null,
                         rotation = parseRotation(s.optJSONArray("side_data_list")),
                         codecTag = parseCodecTag(s.optString("codec_tag_string")),

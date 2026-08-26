@@ -174,7 +174,9 @@ class TrimService : Service() {
          *
          * 音轨：用户可在分析页为每文件指定默认音轨（[defaultAudioIndex]，全局流索引）。
          *  - 指定的音轨在保留集中 → 标 default；其余保留音轨清 0
-         *  - 未指定 / 指定轨被丢 → 兜底走旧逻辑：输出第一保留音轨 default、其余 0
+         *  - 未指定 / 指定轨被丢 → 跟随**源默认音轨**（disposition.default，取保留
+         *    集中第一条）；源无默认 / 源默认轨被丢 / 兜底探测未知（null）→ 退回
+         *    首保留音轨标 default（防丢默认轨后播放器不选任何音轨）
          *  - 无保留音轨 → 不输出任何音轨 disposition
          *
          * 字幕轨：[defaultSubIndex] 为 null（默认）时不输出字幕 disposition，沿用源
@@ -199,10 +201,11 @@ class TrimService : Service() {
             if (keptAudio.isEmpty() && (keptSubs.isEmpty() || defaultSubIndex == null)) return ""
             return buildString {
                 if (keptAudio.isNotEmpty()) {
-                    // 兜底：用户未指定 / 指定轨被丢 → 默认第一保留音轨
+                    // 优先级：用户指定 > 源默认（保留集中第一条）> 首保留音轨兜底
                     val desired = defaultAudioIndex?.let { idx ->
                         keptAudio.indexOfFirst { it.index == idx }.takeIf { it >= 0 }
-                    } ?: 0
+                    } ?: keptAudio.indexOfFirst { it.dispositionDefault == true }.takeIf { it >= 0 }
+                        ?: 0
                     keptAudio.forEachIndexed { i, _ ->
                         if (i == desired) append(" -disposition:a:").append(i).append(" default")
                         else append(" -disposition:a:").append(i).append(" 0")
