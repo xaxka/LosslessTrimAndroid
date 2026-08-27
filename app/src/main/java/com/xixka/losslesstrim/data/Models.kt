@@ -37,8 +37,8 @@ data class StreamInfo(
     // （dvh1/dvhe/dva1/dvav；codec_name 对 DV 仍报 hevc/avc，靠 tag 区分）
     val codecTag: String? = null,
     // ffprobe pix_fmt（视频流像素格式，如 yuv420p / yuv420p10le）。
-    // null=未知（platform 兜底探测 / 旧缓存行）。10-bit 判定的依据：
-    // mediacodec 硬解 10-bit HEVC 的缩略图颜色不可靠 → 自动走软解
+    // null=未知（platform 兜底探测 / 旧缓存行）。保留入库（缓存 JSON 兼容），
+    // 供 10-bit 判定（StreamInfo.is10Bit）与后续诊断使用
     val pixFmt: String? = null,
     // ffprobe disposition.default：该轨在源文件里是否被标记为默认轨。
     // null=未知（平台 MediaExtractor 兜底拿不到 / 旧缓存行）——音轨兜底
@@ -160,13 +160,9 @@ data class ProbeResult(
     val audioStream: StreamInfo?
         get() = streams.firstOrNull { it.isAudio }
 
-    /**
-     * 缩略图能否走硬解（mediacodec）：仅当存在视频流且**确认是 8-bit**。
-     * 10-bit（yuv420p10le/p010le）硬解颜色不可靠 → 软解；
-     * pix_fmt 未知（null，platform 兜底/旧缓存）→ 保守软解。
-     */
-    val hwThumbEligible: Boolean
-        get() = streams.firstOrNull { it.isVideo }?.let { it.pixFmt != null && !it.is10Bit } == true
+    // （2026-08-27）原 hwThumbEligible（仅 8-bit 才允许 FFmpeg 硬解的资格判定）
+    // 已随 FFmpeg -hwaccel mediacodec 硬解链整体移除：MediaCodec 直解自管
+    // 10-bit 颜色（P010→8bit），软解本就颜色正确，不再需要按位深分流。
 }
 
 /** 列表里的一条视频 */

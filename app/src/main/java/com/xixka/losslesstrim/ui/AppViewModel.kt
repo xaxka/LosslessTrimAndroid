@@ -94,10 +94,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         // 缩略图解码开关同步到 ThumbStore（thumb() 调用点分散在 Composable，全局 volatile 开关最省侵入）：
-        // hwDecodeThumbs = FFmpeg -hwaccel mediacodec 路线；mcDecodeThumbs = 实验性 MediaCodec 直解路线
+        // mcDecodeThumbs = 实验性 MediaCodec 直解路线（FFmpeg 硬解已移除，软解为默认主路径）
         viewModelScope.launch {
             settings.collect {
-                ThumbStore.hwDecodeEnabled = it.hwDecodeThumbs
                 ThumbStore.mcThumbEnabled = it.mcDecodeThumbs
             }
         }

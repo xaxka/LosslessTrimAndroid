@@ -292,8 +292,6 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                     }
                     val dS = plan.actualStart - plan.requestedStart
                     val dE = plan.actualEnd - plan.requestedEnd
-                    // 10-bit 文件硬解颜色不可靠 → 两个切点预览都不给硬解资格
-                    val allowHw = entry.probe.hwThumbEligible
                     if (keyframes == null) {
                         // 先探测关键帧、探测结束再生成缩略图：
                         // 1) 对齐前的 actual 切点还会随探测结果变化，提前抽帧必然作废重抽；
@@ -314,7 +312,6 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                                 identity = entry.sizeBytes.toString(),
                                 modifier = Modifier.weight(1f),
                                 nearestKfSec = kfs.lastOrNull { it <= plan.actualStart },
-                                allowHw = allowHw,
                             )
                             FramePreview(
                                 uri = entry.docUri,
@@ -324,7 +321,6 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                                 identity = entry.sizeBytes.toString(),
                                 modifier = Modifier.weight(1f),
                                 nearestKfSec = kfs.lastOrNull { it <= endFrameSec },
-                                allowHw = allowHw,
                             )
                         }
                     }

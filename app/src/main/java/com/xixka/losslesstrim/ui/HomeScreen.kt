@@ -407,11 +407,9 @@ fun HomeScreen(
                             ) {
                                 // 列表缩略图固定抽首帧（timeMs=0）：第 0 帧必是关键帧，
                                 // 无需 seek 也无需关键帧探测，秒出且 EOF 天然安全。
-                                // 10-bit 文件硬解颜色不可靠 → 不给硬解资格（ProbeResult.hwThumbEligible）
                                 VideoThumb(
                                     e.docUri,
                                     identity = e.sizeBytes.toString(),
-                                    allowHw = e.probe.hwThumbEligible,
                                 )
                                 Spacer(Modifier.padding(6.dp))
                                 Column(Modifier.weight(1f)) {

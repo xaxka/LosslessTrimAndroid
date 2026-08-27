@@ -37,20 +37,15 @@ import java.util.Locale
 object ThumbStore {
 
     /**
-     * 硬解总开关（设置页"缩略图硬解"，AppViewModel 观察 settings 同步写入）。
-     * 默认 false = 软解优先：颜色可靠（10-bit HEVC → 8-bit 正确转换），
-     * 缩略图场景慢一点可接受。硬解快 5-10x 但 10-bit 输出颜色可能不可靠，
-     * 由用户自行权衡开启，**不做 isBitmapHealthy 自动检测回退**——
-     * stddev 检测会误杀极端合法画面（全单色背景/重彩动画），宁可交还选择权。
-     */
-    @Volatile
-    var hwDecodeEnabled: Boolean = false
-
-    /**
      * 实验性“MediaCodec 直解缩略图”开关（设置页，AppViewModel 观察 settings 同步写入）。
      * 开启后抽帧链路最前面插入 MediaCodecThumb 直解：10-bit HEVC 走 P010→8bit
      * CPU 转换（stride/crop/旋转/颜色矩阵自管）、HDR 尝试请求 tone-map；
      * 失败或不健康自动回退 FFmpeg 既有链路。用于验证“硬解10bit缩略图.txt”方案。
+     *
+     * （2026-08-27）FFmpeg `-hwaccel mediacodec` 硬解开关已移除：copyback 模式
+     * 下单帧抽帧（GOP 全解 + 每帧显存拷回 + JNI 同步轮询 + codec 初始化
+     * 首帧延迟）实测比软解更慢，且 10-bit 颜色元数据不可靠；硬件加速路线
+     * 统一并入本直解方案（同一硬解码器、零拷贝、颜色自管）。
      */
     @Volatile
     var mcThumbEnabled: Boolean = false
@@ -347,7 +342,6 @@ object ThumbStore {
         maxPx: Int,
         preview: Boolean = false,
         nearestKfSec: Double? = null,
-        allowHw: Boolean = true,
     ): Bitmap? {
         memCache.get(key)?.let { return it }
         if (isRecentlyFailed(key)) return null
@@ -376,7 +370,7 @@ object ThumbStore {
                             // 实验性 MediaCodec 直解优先；失败/不健康自动回退 ffmpeg 软解
                             tryExtractViaMediaCodec(app, key, uri, timeMs, maxPx)
                                 ?.let { return@withContext it }
-                            val ffmpegBmp = extractViaFfmpeg(app, uri, timeMs, maxPx, nearestKfSec, allowHw)
+                            val ffmpegBmp = extractViaFfmpeg(app, uri, timeMs, maxPx, nearestKfSec)
                             if (ffmpegBmp != null) {
                                 memCache.put(key, ffmpegBmp)
                                 saveToDisk(app, key, ffmpegBmp)
@@ -406,7 +400,7 @@ object ThumbStore {
                 memCache.get(key)
                     ?: loadFromDisk(app, key)   // 排队期间可能已被其它协程写入缓存
                     ?: run { tryExtractViaMediaCodec(app, key, uri, timeMs, maxPx) }
-                    ?: extractViaFfmpeg(app, uri, timeMs, maxPx, allowHw = allowHw)?.also { bmp ->
+                    ?: extractViaFfmpeg(app, uri, timeMs, maxPx)?.also { bmp ->
                         memCache.put(key, bmp)
                         saveToDisk(app, key, bmp)
                     } ?: extractViaPlatform(app, uri, timeMs, maxPx)?.also { bmp ->
@@ -557,29 +551,30 @@ object ThumbStore {
      *
      * 单次约 80~200ms：每分析页最多两张切点抽帧 + 拖动 200ms 防抖，可接受。
      */
-    private fun extractViaFfmpeg(context: Context, uri: Uri, timeMs: Long, maxPx: Int, nearestKfSec: Double? = null, allowHw: Boolean = true): Bitmap? {
+    private fun extractViaFfmpeg(context: Context, uri: Uri, timeMs: Long, maxPx: Int, nearestKfSec: Double? = null): Bitmap? {
         val path = StorageAccess.accessibleFile(context, uri)?.absolutePath ?: return null
         val outDir = File(context.cacheDir, FFMPEG_THUMB_DIR)
         if (!outDir.exists()) outDir.mkdirs()
         val outFile = File(outDir, "ff_${System.currentTimeMillis()}_${Thread.currentThread().id}.jpg")
         val ss = (timeMs / 1000.0).coerceAtLeast(0.0)
         val ssStr = String.format(Locale.US, "%.3f", ss)
-        // === 缩略图抽帧策略（2026-08-23 重构）===
+        // === 缩略图抽帧策略（2026-08-23 重构；2026-08-27 移除 FFmpeg 硬解链）===
         // 根因：视频是 limited range (tv, Y:16-235)，JPEG 需要 full range (pc, 0-255)
         // FFmpeg 默认不做 range 转换，直接把 limited range 数据塞进 JPEG → 颜色错乱/花屏
         // 修复：scale 滤镜加 out_range=pc 做 limited→full range 转换
         // 参考StackOverflow: https://stackoverflow.com/questions/74350828
         //
-        // 软解（默认）：native hevc/x265 软解，10-bit → 8-bit 颜色正确；
+        // 软解：native hevc/x265 软解，10-bit → 8-bit 颜色正确；
         //   **不再用 -skip_frame nokey**——它只解 I 帧，与 -ss input seek 组合时
         //   （目标点之前的 I 帧被 seek 丢弃、目标点又是 P/B 帧被跳过）会导致
         //   Filtergraph 无帧输出，抽帧必然失败。
-        // 硬解（设置开关）：GPU 解 HEVC 快 5-10x，但 10-bit 输出颜色可能不可靠。
-        //   用户可在设置中开启，自行权衡速度与颜色准确性。
-        // 回退链（有最近关键帧 + 硬解）：hw-out-seek → hw-input-seek → sw-out-seek → sw-input-seek
-        // 回退链（有最近关键帧 + 软解）：sw-out-seek → sw-input-seek
-        // 回退链（无关键帧 + 硬解）：hw-input-seek → hw-out-seek → sw-input-seek → sw-out-seek
-        // 回退链（无关键帧 + 软解）：sw-input-seek → sw-out-seek
+        // FFmpeg 硬解（-hwaccel mediacodec copyback）已整链移除：单帧抽帧负载下
+        //   GOP 中间帧每帧都要 av_hwframe_transfer_data 显存→内存拷回 + JNI 同步
+        //   轮询 + codec 初始化/首帧延迟，实测比软解更慢（首帧=I 帧的列表缩略图
+        //   最惨），且 10-bit 元数据不可靠。硬件路线由 MediaCodecThumb 直解取代
+        //   （同一硬解码器、零拷贝、颜色自管），失败自动回退本软解链路。
+        // 回退链（有最近关键帧）：sw-out-seek → sw-input-seek
+        // 回退链（无关键帧）：sw-input-seek → sw-out-seek
 
         // --- 软件解码命令 ---
         val swCommon = "-hide_banner -loglevel info -err_detect ignore_err -threads 0"
@@ -592,44 +587,16 @@ object ThumbStore {
         val swOutCmd = "$swCommon -ss ${String.format(Locale.US, "%.3f", preSec)} -i \"$path\" " +
                 "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$swVf\" -q:v 3 -y \"${outFile.absolutePath}\""
 
-        // --- 硬件解码命令 ---
-        val hwCommon = "-hide_banner -loglevel info -err_detect ignore_err -hwaccel mediacodec -threads 0"
-        // 硬解帧的颜色元数据（range/matrix）经常丢失或标错——mediacodec copyback 的已知坑：
-        // auto 拿不到标记就退化成默认值（full range / bt601），out_range=pc 拿错源转换 → 偏色。
-        // 显式写死 in_range=tv + bt709（视频几乎全是 limited range + bt709）兜住最常见偏色。
-        // 软解命令的 auto 不动：软解元数据完整，auto 本来就对。
-        // 注：HDR（bt2020pq）内容仍会偏色，缩略图场景可接受。
-        val hwVf = "scale='min($maxPx,iw)':-1:in_range=tv:in_color_matrix=bt709:out_color_matrix=bt709:out_range=pc"
-        val hwInputCmd = "$hwCommon -ss $ssStr -i \"$path\" -an -sn -frames:v 1 -vf \"$hwVf\" -q:v 3 -y \"${outFile.absolutePath}\""
-        val hwOutCmd = "$hwCommon -ss ${String.format(Locale.US, "%.3f", preSec)} -i \"$path\" " +
-                "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$hwVf\" -q:v 3 -y \"${outFile.absolutePath}\""
-
         val firstCmd = if (nearestKfSec != null) swOutCmd else swInputCmd
-        // 设置页开关 × 调用方资格（10-bit 文件由 ProbeResult.hwThumbEligible 判定，硬解颜色不可靠）
-        val hwDecode = hwDecodeEnabled && allowHw
         return try {
             if (nearestKfSec != null) {
                 // 有最近关键帧：两阶段 seek 优先（output-seek 阶段 AVDiscard 跳非参考帧加速）
-                if (hwDecode) {
-                    runFfmpegOnce(hwOutCmd, path, timeMs, outFile)
-                        ?: runFfmpegOnce(hwInputCmd, path, timeMs, outFile)
-                        ?: runFfmpegOnce(swOutCmd, path, timeMs, outFile)
-                        ?: runFfmpegOnce(swInputCmd, path, timeMs, outFile)
-                } else {
-                    runFfmpegOnce(swOutCmd, path, timeMs, outFile)
-                        ?: runFfmpegOnce(swInputCmd, path, timeMs, outFile)
-                }
+                runFfmpegOnce(swOutCmd, path, timeMs, outFile)
+                    ?: runFfmpegOnce(swInputCmd, path, timeMs, outFile)
             } else {
                 // 无关键帧信息：input-seek 优先
-                if (hwDecode) {
-                    runFfmpegOnce(hwInputCmd, path, timeMs, outFile)
-                        ?: runFfmpegOnce(hwOutCmd, path, timeMs, outFile)
-                        ?: runFfmpegOnce(swInputCmd, path, timeMs, outFile)
-                        ?: runFfmpegOnce(swOutCmd, path, timeMs, outFile)
-                } else {
-                    runFfmpegOnce(swInputCmd, path, timeMs, outFile)
-                        ?: runFfmpegOnce(swOutCmd, path, timeMs, outFile)
-                }
+                runFfmpegOnce(swInputCmd, path, timeMs, outFile)
+                    ?: runFfmpegOnce(swOutCmd, path, timeMs, outFile)
             }
         } catch (e: Exception) {
             recordFailure(FailureRecord(

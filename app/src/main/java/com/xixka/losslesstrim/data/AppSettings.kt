@@ -33,17 +33,13 @@ data class AppSettings(
     /** 首次覆盖确认已展示过 */
     val overwriteConfirmed: Boolean = false,
     /**
-     * 缩略图硬解（设置页“缩略图解码方式”三选一中的实验项）：FFmpeg 内部走
-     * mediacodec 硬解，快 5-10 倍但 10-bit HEVC 颜色可能不可靠。
-     * 与 [mcDecodeThumbs] 互斥（设置页已改为单一三选一，选一个自动关另一个；
-     * 两个独立开关并存时用户能同时打开，语义重叠且困惑，已废弃该形态）。
-     */
-    val hwDecodeThumbs: Boolean = false,
-    /**
-     * 实验性：MediaCodec 直解缩略图（三选一中的另一实验项，绕开 FFmpeg，
+     * 实验性：MediaCodec 直解缩略图（设置页二选一中的实验项，绕开 FFmpeg，
      * 直接用系统解码器 + 自管颜色）：10-bit 走 P010→8bit CPU 转换，HDR 尝试
      * 请求 tone-map；失败自动回退 FFmpeg。用于验证“硬解10bit缩略图.txt”方案。
-     * 与 [hwDecodeThumbs] 互斥；旧数据两个都为 true 时 ThumbStore 优先本项。
+     *
+     * （2026-08-27）原 FFmpeg `-hwaccel mediacodec` 硬解项已移除（copyback 单帧
+     * 抽帧比软解更慢且 10-bit 颜色不可靠）；旧数据 hw_decode_thumbs=true 的
+     * 用户升级后自然回到默认软解，DataStore 残键不再读取，无迁移必要。
      */
     val mcDecodeThumbs: Boolean = false,
 )
@@ -58,7 +54,6 @@ class SettingsRepository(private val context: Context) {
         val OVERWRITE = booleanPreferencesKey("overwrite")
         val TRUNCATE = booleanPreferencesKey("truncate_overlong")
         val CONFIRMED = booleanPreferencesKey("overwrite_confirmed")
-        val HW_THUMBS = booleanPreferencesKey("hw_decode_thumbs")
         val MC_THUMBS = booleanPreferencesKey("mc_decode_thumbs")
         /** 每文件覆盖设置（含丢弃轨道）整体序列化为一个 JSON 串 */
         val OVERRIDES = stringPreferencesKey("per_file_overrides")
@@ -72,7 +67,6 @@ class SettingsRepository(private val context: Context) {
             overwrite = p[Keys.OVERWRITE] ?: true,
             truncateOverlong = p[Keys.TRUNCATE] ?: true,
             overwriteConfirmed = p[Keys.CONFIRMED] ?: false,
-            hwDecodeThumbs = p[Keys.HW_THUMBS] ?: false,
             mcDecodeThumbs = p[Keys.MC_THUMBS] ?: false,
         )
     }
@@ -102,7 +96,6 @@ class SettingsRepository(private val context: Context) {
                 overwrite = p[Keys.OVERWRITE] ?: true,
                 truncateOverlong = p[Keys.TRUNCATE] ?: true,
                 overwriteConfirmed = p[Keys.CONFIRMED] ?: false,
-                hwDecodeThumbs = p[Keys.HW_THUMBS] ?: false,
                 mcDecodeThumbs = p[Keys.MC_THUMBS] ?: false,
             )
             val next = transform(cur)
@@ -112,7 +105,6 @@ class SettingsRepository(private val context: Context) {
             p[Keys.OVERWRITE] = next.overwrite
             p[Keys.TRUNCATE] = next.truncateOverlong
             p[Keys.CONFIRMED] = next.overwriteConfirmed
-            p[Keys.HW_THUMBS] = next.hwDecodeThumbs
             p[Keys.MC_THUMBS] = next.mcDecodeThumbs
         }
     }
