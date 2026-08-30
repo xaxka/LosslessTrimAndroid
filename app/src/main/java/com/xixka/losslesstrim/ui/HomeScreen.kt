@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
@@ -59,6 +60,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.xixka.losslesstrim.data.TrimMode
 import com.xixka.losslesstrim.data.VideoEntry
+import com.xixka.losslesstrim.trim.QueueUi
 import com.xixka.losslesstrim.trim.TrimController
 import com.xixka.losslesstrim.ui.theme.BlExt
 import com.xixka.losslesstrim.util.Formats
@@ -69,9 +71,11 @@ import com.xixka.losslesstrim.util.StorageAccess
 @Composable
 fun HomeScreen(
     vm: AppViewModel,
+    listState: LazyListState,
     onOpenAnalysis: (VideoEntry) -> Unit,
     onOpenSettings: () -> Unit,
     onStartProcessing: () -> Unit,
+    onShowResult: () -> Unit,
 ) {
     val context = LocalContext.current
     val settings by vm.settings.collectAsState()
@@ -83,6 +87,7 @@ fun HomeScreen(
     val processable by vm.processableCount.collectAsState()
     val spaceWarning by vm.spaceWarning.collectAsState()
     val treeUri by vm.treeUri.collectAsState()
+    val queueUi by TrimController.queueUi.collectAsState()
 
     val snackbar = remember { SnackbarHostState() }
     var showConfirm by remember { mutableStateOf(false) }
@@ -255,6 +260,12 @@ fun HomeScreen(
                                 maxLines = 1,
                             )
                         }
+                        // 上次批处理已完成且用户不在处理页：完成自动跳转只在处理页生效，
+                        // 离开后结果页就没有任何入口了，这里补直达入口
+                        if (queueUi is QueueUi.Finished && !TrimController.running) {
+                            Spacer(Modifier.width(8.dp))
+                            BlOutlinedButton(onClick = onShowResult) { Text("上次结果") }
+                        }
                     }
                 }
             }
@@ -394,6 +405,7 @@ fun HomeScreen(
                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
                 ) {
                     LazyColumn(
+                        state = listState,
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
                     ) {
                         itemsIndexed(statuses, key = { _, s -> s.entry.docUri.toString() }) { _, st ->

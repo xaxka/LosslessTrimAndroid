@@ -9,6 +9,8 @@ import android.os.Build
 import android.os.Environment
 import android.util.LruCache
 import com.antonkarpenko.ffmpegkit.FFmpegKit
+import com.xixka.losslesstrim.ffmpeg.SessionBridge
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -74,28 +76,29 @@ object ThumbStore {
     /**
      * 系统内存压力回调（MainApplication.onTrimMemory 路由过来）。
      *
-     * 分级释放：
+     * 分级释放（分支顺序即语义：Android 的 level 数值不严格对应严重度，
+     * 后台家族与前台家族必须分开判，不能一条 >= 阈值走到底）：
+     *  - 后台家族（UI_HIDDEN / BACKGROUND / MODERATE / COMPLETE）：用户看不到，
+     *    全清 memCache，回前台从盘上重读（~50ms/张）；失败哨兵留着（小，
+     *    防止回前台时坏图高频重试抽帧）
      *  - RUNNING_LOW / RUNNING_CRITICAL（用户正用本应用且吃紧）：全清 memCache +
      *    failed / mcFailed / recentFailures——重建代价低，先把 RAM 让出去；
      *    磁盘缓存不动（盘 → 内存重读远比杀后台进程便宜）
-     *  - BACKGROUND / UI_HIDDEN（本应用进后台）：全清 memCache（反正用户看不到，
-     *    回前台从盘上重读，~50ms/张）；failed / recentFailures 留着（小，
-     *    防止回前台时坏图重试抽帧）
-     *  - MODERATE / RUNNING_MODERATE：保留 memCache（前台列表秒出比省这几 MB 更重要），
+     *  - RUNNING_MODERATE：保留 memCache（前台列表秒出比省这几 MB 更重要），
      *    仅清 failed 老条目（过期哨兵本就失效，顺手清）
      */
     fun onTrimMemory(level: Int) {
         when {
+            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN -> {
+                memCache.evictAll()
+            }
             level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> {
                 memCache.evictAll()
                 failed.evictAll()
                 mcFailed.evictAll()
                 synchronized(recentFailures) { recentFailures.clear() }
             }
-            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_BACKGROUND -> {
-                memCache.evictAll()
-            }
-            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_MODERATE -> {
+            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE -> {
                 // 温和档：不动 memCache，只清可能已过期的 failed 老条目
                 // （下一轮抽帧时 isRecentlyFailed 会自然放过，这里清只是顺势）
                 failed.trimToSize(0)
@@ -551,10 +554,11 @@ object ThumbStore {
      *
      * 单次约 80~200ms：每分析页最多两张切点抽帧 + 拖动 200ms 防抖，可接受。
      */
-    private fun extractViaFfmpeg(context: Context, uri: Uri, timeMs: Long, maxPx: Int, nearestKfSec: Double? = null): Bitmap? {
+    private suspend fun extractViaFfmpeg(context: Context, uri: Uri, timeMs: Long, maxPx: Int, nearestKfSec: Double? = null): Bitmap? {
         val path = StorageAccess.accessibleFile(context, uri)?.absolutePath ?: return null
         val outDir = File(context.cacheDir, FFMPEG_THUMB_DIR)
         if (!outDir.exists()) outDir.mkdirs()
+        pruneStaleTemps(outDir)
         val outFile = File(outDir, "ff_${System.currentTimeMillis()}_${Thread.currentThread().id}.jpg")
         val ss = (timeMs / 1000.0).coerceAtLeast(0.0)
         val ssStr = String.format(Locale.US, "%.3f", ss)
@@ -598,6 +602,8 @@ object ThumbStore {
                 runFfmpegOnce(swInputCmd, path, timeMs, outFile)
                     ?: runFfmpegOnce(swOutCmd, path, timeMs, outFile)
             }
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (e: Exception) {
             recordFailure(FailureRecord(
                 at = System.currentTimeMillis(),
@@ -614,9 +620,13 @@ object ThumbStore {
     }
 
     /** 单次 ffmpeg 抽帧执行；失败（rc 非成功/输出为空）返回 null 让 caller 沿回退链继续。不做健康检测——是否用硬解交由设置开关决定 */
-    private fun runFfmpegOnce(cmd: String, path: String, timeMs: Long, outFile: File): Bitmap? {
+    private suspend fun runFfmpegOnce(cmd: String, path: String, timeMs: Long, outFile: File): Bitmap? {
         val session = try {
-            FFmpegKit.execute(cmd)
+            // 与剪辑/探测会话共用全局执行锁：并发执行时库对日志的会话归属不可靠，
+            // 抽帧与批处理重叠会把外来行混进 ffprobe/ffmpeg 输出（见 SessionBridge）
+            SessionBridge.withExecuteLock { FFmpegKit.execute(cmd) }
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (e: Exception) {
             recordFailure(FailureRecord(
                 at = System.currentTimeMillis(),
@@ -731,6 +741,19 @@ object ThumbStore {
     }
 
     private const val FFMPEG_THUMB_DIR = "ffmpeg-thumb"
+
+    /** 临时抽帧 JPEG 保留期：正常路径用完即删，只有进程被杀才遗留残文件 */
+    private const val FFMPEG_THUMB_MAX_AGE_MS = 60 * 60 * 1000L
+
+    /** 清理进程被杀遗留的过期临时抽帧文件（阈值远长于单次抽帧，不会误删进行中的） */
+    private fun pruneStaleTemps(dir: File) {
+        val now = System.currentTimeMillis()
+        dir.listFiles()?.forEach { f ->
+            if (f.isFile && now - f.lastModified() > FFMPEG_THUMB_MAX_AGE_MS) {
+                try { f.delete() } catch (_: Exception) {}
+            }
+        }
+    }
 
     private fun scaleAndRecycle(orig: Bitmap?, maxPx: Int): Bitmap? {
         if (orig == null) return null

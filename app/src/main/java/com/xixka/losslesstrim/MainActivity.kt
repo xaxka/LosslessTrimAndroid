@@ -4,6 +4,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -47,6 +48,14 @@ fun App() {
     val vm: AppViewModel = viewModel()
     var screen by remember { mutableStateOf<Screen>(Screen.Home) }
     val queueUi by TrimController.queueUi.collectAsState()
+    // 首页列表滚动状态提升到 App 层：页面切换时 HomeScreen 退出组合，
+    // 状态放这里才能跨切换存活，返回时恢复上次位置
+    val homeListState = rememberLazyListState()
+    val treeUri by vm.treeUri.collectAsState()
+    LaunchedEffect(treeUri) {
+        // 换目录/切单文件模式：旧位置对新列表无意义，回顶
+        homeListState.scrollToItem(0)
+    }
 
     // 处理完成自动跳转结果页
     LaunchedEffect(queueUi) {
@@ -64,17 +73,19 @@ fun App() {
     when (val s = screen) {
         Screen.Home -> HomeScreen(
             vm = vm,
+            listState = homeListState,
             onOpenAnalysis = { screen = Screen.Analysis(it) },
             onOpenSettings = { screen = Screen.Settings },
             onStartProcessing = {
                 vm.clearResults()
                 screen = Screen.Processing
             },
+            onShowResult = { screen = Screen.Result },
         )
 
         is Screen.Analysis -> AnalysisScreen(vm, s.entry) { screen = Screen.Home }
 
-        Screen.Processing -> ProcessingScreen()
+        Screen.Processing -> ProcessingScreen(onShowResult = { screen = Screen.Result })
 
         Screen.Result -> ResultScreen(
             vm = vm,

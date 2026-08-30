@@ -209,25 +209,21 @@ object SessionBridge {
     /**
      * 系统内存压力回调（MainApplication.onTrimMemory 路由过来）。
      *
-     * 分级释放：
-     *  - RUNNING_LOW / CRITICAL：清 doneLogs（已定格日志，错误诊断用的，压力下可丢）；
-     *    正在执行的 logBuffers / spills / statHandlers 不动（会话还没完，丢了无法
-     *    回放日志或拿进度）；doneLogs 清 0 即释放 2MB 上限预算
-     *  - BACKGROUND / UI_HIDDEN：同上，doneLogs 全清
-     *  - MODERATE：只清过期的 doneLogs（ LinkedHashMap access-order 下最少用的先进
-     *    先出，对老条目）
+     * 任何压力档都清 doneLogs（已定格日志，仅供 extractError 取尾部几行，
+     * 压力下可丢；清 0 即释放 2MB 上限预算）。正在执行的
+     * logBuffers / spills / statHandlers 不动（会话还没完，丢了无法
+     * 回放日志或拿进度）。
+     * （旧实现 >= MODERATE(60) 才动手，前台吃紧/退后台档全为 no-op，
+     * 与 MainApplication 承诺的"压力下释放可重建缓存"不符）
      */
     fun onTrimMemory(level: Int) {
-        when {
-            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_MODERATE -> {
-                synchronized(doneLogs) {
-                    val it = doneLogs.entries.iterator()
-                    while (it.hasNext()) {
-                        val e = it.next()
-                        doneBytes.addAndGet(-e.value.length.toLong())
-                        it.remove()
-                    }
-                }
+        if (level < android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE) return
+        synchronized(doneLogs) {
+            val it = doneLogs.entries.iterator()
+            while (it.hasNext()) {
+                val e = it.next()
+                doneBytes.addAndGet(-e.value.length.toLong())
+                it.remove()
             }
         }
     }

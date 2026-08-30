@@ -129,8 +129,14 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
     val head = (Formats.parseSeconds(headText) ?: 0.0).coerceAtLeast(0.0)
     val tail = (Formats.parseSeconds(tailText) ?: 0.0).coerceAtLeast(0.0)
     // 原始区间值（-1 = 不切），保存/应用到全部时保持 -1 语义；计算计划时归一化
-    val startRaw = Formats.parseTime(startText) ?: -1.0
-    val endRaw = Formats.parseTime(endText) ?: -1.0
+    val startParsed = Formats.parseTime(startText)
+    val endParsed = Formats.parseTime(endText)
+    // 解析失败 ≠ 不切：非法文本（如 5:70）曾被归一成 -1 悄悄通过，保存时
+    // 产出 null 区间字段、静默清掉已存切点。非法时禁用保存/应用到全部
+    // （输入框已红字提示），改对再存
+    val intervalValid = startParsed != null && endParsed != null
+    val startRaw = startParsed ?: -1.0
+    val endRaw = endParsed ?: -1.0
     val start = startRaw.coerceAtLeast(0.0)
     val end = if (endRaw < 0) dur else endRaw
 
@@ -507,7 +513,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                         vm.setOverride(entry.docUri, buildOverride())
                         onClose()
                     },
-                    enabled = plan.ok,
+                    enabled = plan.ok && (settings.mode == TrimMode.HEAD_TAIL || intervalValid),
                     modifier = Modifier.weight(1f),
                 ) { Text("保存本片设置") }
                 if (savedOverride != null) {
@@ -537,7 +543,7 @@ fun AnalysisScreen(vm: AppViewModel, entry: VideoEntry, onClose: () -> Unit) {
                         onClose()
                     },
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = plan.ok,
+                    enabled = plan.ok && (settings.mode == TrimMode.HEAD_TAIL || intervalValid),
                 ) { Text("应用到全部视频") }
                 Text(
                     "丢弃轨道按编码/语言/标题在各文件匹配同款轨（序号是文件内位置，跨文件不可比）；默认轨跟随各自源默认",

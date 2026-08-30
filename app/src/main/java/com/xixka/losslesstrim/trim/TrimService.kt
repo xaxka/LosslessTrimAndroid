@@ -28,6 +28,7 @@ import com.xixka.losslesstrim.ffmpeg.SyncSamples
 import com.xixka.losslesstrim.util.Formats
 import com.xixka.losslesstrim.util.StorageAccess
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -557,37 +558,57 @@ class TrimService : Service() {
 
     private suspend fun runQueue() {
         TrimController.running = true
+        val results = ArrayList<FileResult>()
         try {
             val jobs = TrimController.takeJobs()
-            val results = ArrayList<FileResult>()
             var idx = 0
             var stopped = false
-            while (idx < jobs.size) {
-                if (TrimController.cancelRequested) {
-                    stopped = true
-                    break
+            try {
+                while (idx < jobs.size) {
+                    if (TrimController.cancelRequested) {
+                        stopped = true
+                        break
+                    }
+                    val job = jobs[idx]
+                    val res = try {
+                        processJob(job, idx, jobs.size)
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (e: Exception) {
+                        // 单文件未捕获异常不能拖死整个队列：记失败、继续其余文件
+                        FileResult(
+                            entry = job.entry,
+                            plan = TrimPlanner.logicalPlan(job.entry, job.settings, job.override),
+                            outcome = Outcome.FAILED,
+                            origSize = job.entry.sizeBytes,
+                            reason = "内部错误：${e.javaClass.simpleName}: ${e.message}",
+                        )
+                    }
+                    results += res
+                    // 先自增再判取消：当前文件的结果已入列，补录从未处理的下一个开始，
+                    // 否则同一文件会被补录第二条 CANCELLED，导致结果页 key 冲突崩溃
+                    idx++
+                    if (res.outcome == Outcome.CANCELLED) {
+                        stopped = true
+                        break
+                    }
                 }
-                val job = jobs[idx]
-                val res = processJob(job, idx, jobs.size)
-                results += res
-                // 先自增再判取消：当前文件的结果已入列，补录从未处理的下一个开始，
-                // 否则同一文件会被补录第二条 CANCELLED，导致结果页 key 冲突崩溃
-                idx++
-                if (res.outcome == Outcome.CANCELLED) {
-                    stopped = true
-                    break
+                if (stopped) {
+                    for (j in idx until jobs.size) {
+                        results += FileResult(
+                            entry = jobs[j].entry,
+                            plan = TrimPlanner.logicalPlan(jobs[j].entry, jobs[j].settings, jobs[j].override),
+                            outcome = Outcome.CANCELLED,
+                            origSize = jobs[j].entry.sizeBytes,
+                            reason = "已取消（未处理）",
+                        )
+                    }
                 }
-            }
-            if (stopped) {
-                for (j in idx until jobs.size) {
-                    results += FileResult(
-                        entry = jobs[j].entry,
-                        plan = TrimPlanner.logicalPlan(jobs[j].entry, jobs[j].settings, jobs[j].override),
-                        outcome = Outcome.CANCELLED,
-                        origSize = jobs[j].entry.sizeBytes,
-                        reason = "已取消（未处理）",
-                    )
-                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Exception) {
+                // 兜底：队列级逻辑异常也确保发出 Finished——否则 queueUi 永远停在
+                // Running，处理页永久转圈、首页"开始处理"被 running 标志挡死
             }
             TrimController.lastResults.value = results
             TrimController.queueUi.value = QueueUi.Finished(results)
@@ -800,7 +821,16 @@ class TrimService : Service() {
         } else {
             if (finalFile.exists()) {
                 displacedFile = File(outDirFile, "$finalName.oldtrim")
-                if (!finalFile.renameTo(displacedFile)) finalFile.delete()
+                if (!finalFile.renameTo(displacedFile)) {
+                    // 旧成片无法让位：绝不静默删除（上次成片是用户数据）。
+                    // 与覆盖模式备份失败同策略——跳过替换、明确报错，原片/旧成片
+                    // 都不动，本次输出已随 .part 清理
+                    partFile.delete()
+                    return FileResult(
+                        entry, plan, Outcome.FAILED, entry.sizeBytes,
+                        reason = "无法移走旧成片 ${finalFile.name}（目录不支持改名），已跳过，原文件与旧成片未动"
+                    )
+                }
             }
         }
         if (!partFile.renameTo(finalFile)) {

@@ -256,6 +256,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 val list = result.entries
                 _files.value = list
+                if (result.error == null) pruneOrphanOverrides(list)
                 _orphans.value = result.orphans
                 _scanMsg.value = when {
                     // 致命错误（未授权/目录不可达）：直接展示，不进入常规统计文案
@@ -286,6 +287,21 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             if (o == null || o.isEmpty) m - uri else m + (uri to o)
         }
         persistOverrides()
+    }
+
+    /**
+     * 清理孤儿覆盖设置：目录里已不存在（被删/换目录后）的文件的设置不再有用，
+     * 持久化 JSON 否则会随用户换目录无限累积。仅在扫描成功且列表非空时执行——
+     * 偶发的空扫描结果不应误删全部设置。单文件模式不走 rescan，不受影响。
+     */
+    private fun pruneOrphanOverrides(entries: List<VideoEntry>) {
+        if (entries.isEmpty()) return
+        val uris = entries.mapTo(HashSet<Uri>()) { it.docUri }
+        val orphans = _overrides.value.keys.filterNot { it in uris }.toSet()
+        if (orphans.isNotEmpty()) {
+            _overrides.update { m -> m - orphans }
+            persistOverrides()
+        }
     }
 
     /** 覆盖设置写入 DataStore（异步，失败不影响内存态） */

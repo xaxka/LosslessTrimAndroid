@@ -36,43 +36,25 @@ class MainApplication : Application() {
      * 系统内存压力回调：分梯度释放各层缓存，避免应用独占 RAM 触发 LMK
      * 杀掉后台进程（音乐 / 微信 / 浏览器等）。
      *
-     * 分级（按 Android ComponentCallbacks2 文档）：
-     *  - TRIM_MEMORY_RUNNING_LOW / CRITICAL：用户正用本应用且内存吃紧 → 立即全清
-     *    可重建的进程内 L1/L2 缓存（缩略图 memCache / 关键帧 / probe / done 日志），
-     *    仅保留正在跑的 ffmpeg 会话缓冲（裁剪途中不可丢）；磁盘缓存不动（下次进入
-     *    页面从盘上重读到内存的开销远小于杀进程的代价）
-     *  - TRIM_MEMORY_BACKGROUND / UI_HIDDEN：应用退到后台 → 清中等量
-     *    （doneLogs 全清、probeCache / keyframeCache 清；ThumbStore memCache
-     *    保留一半，下次回前台秒出第一屏）
-     *  - TRIM_MEMORY_MODERATE / RUNNING_MODERATE：温和档清最易重建的部分
-     *    （doneLogs 老条目、keyframeCache 邻域条目；ThumbStore memCache 不动，
-     *    列表缩略图秒出比省这几 MB 更重要）
+     * 注意：Android 的 level 数值不代表严重度梯度（RUNNING_MODERATE=5、
+     * RUNNING_LOW=10、RUNNING_CRITICAL=15、UI_HIDDEN=20、BACKGROUND=40、
+     * MODERATE=60、COMPLETE=80），不能用一条 >= 阈值分级——这里只负责把
+     * 任一压力事件路由给全部缓存模块，力度由各模块自行判定：
+     *  - ThumbStore：后台家族清 memCache、前台吃紧连失败哨兵一起清、
+     *    温和档只清过期哨兵（见其 onTrimMemory）
+     *  - Scanner / Probe / SessionBridge：缓存皆可重建（Room L2 / 磁盘仍在），
+     *    任何压力档都清——批处理内存吃紧时不释放它们正是旧实现 OOM 的诱因之一
      *
-     * 注意：onTrimMemory 不会在进程启动时调用；初值 = 各 LRU 上限。
+     * 磁盘缓存不动（下次进入页面从盘上重读到内存的开销远小于杀进程的代价）。
+     * onTrimMemory 不会在进程启动时调用；初值 = 各 LRU 上限。
      */
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-        when {
-            level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> {
-                // 严重压力：全清可重建的进程内缓存
-                ThumbStore.onTrimMemory(level)
-                Scanner.onTrimMemory(level)
-                Probe.onTrimMemory(level)
-                SessionBridge.onTrimMemory(level)
-            }
-            level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND -> {
-                // 应用进后台：清中量
-                ThumbStore.onTrimMemory(level)
-                Scanner.onTrimMemory(level)
-                Probe.onTrimMemory(level)
-                SessionBridge.onTrimMemory(level)
-            }
-            level >= ComponentCallbacks2.TRIM_MEMORY_MODERATE -> {
-                // 温和压力：清最易重建的部分
-                Probe.onTrimMemory(level)
-                SessionBridge.onTrimMemory(level)
-            }
-        }
+        if (level < ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE) return
+        ThumbStore.onTrimMemory(level)
+        Scanner.onTrimMemory(level)
+        Probe.onTrimMemory(level)
+        SessionBridge.onTrimMemory(level)
     }
 
     override fun onLowMemory() {

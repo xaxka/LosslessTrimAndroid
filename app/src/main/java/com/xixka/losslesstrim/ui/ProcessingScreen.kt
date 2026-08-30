@@ -19,6 +19,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
+import com.xixka.losslesstrim.data.Outcome
 import com.xixka.losslesstrim.trim.QueueUi
 import com.xixka.losslesstrim.trim.TrimController
 import com.xixka.losslesstrim.ui.theme.BlExt
@@ -26,7 +27,7 @@ import com.xixka.losslesstrim.ui.theme.BlSurfaceVariant
 
 /** 处理中页：标题 + N/M + 4dp 圆角进度条 + 当前文件名（等宽灰字） */
 @Composable
-fun ProcessingScreen() {
+fun ProcessingScreen(onShowResult: () -> Unit) {
     val q by TrimController.queueUi.collectAsState()
 
     Column(
@@ -109,6 +110,27 @@ fun ProcessingScreen() {
                         },
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text("取消（.part 将被删除，原文件不动）") }
+                }
+            }
+
+            is QueueUi.Finished -> {
+                // 完成自动跳转只在"停留在处理页"时生效；离开过再进来（或自动跳转
+                // 被页面切换打断）会停在这里，必须给出去结果页的入口
+                val okCount = state.results.count { it.outcome == Outcome.SUCCESS }
+                SectionCard(title = null, modifier = Modifier.fillMaxWidth()) {
+                    Text("批量处理已完成", style = MaterialTheme.typography.titleLarge)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "共 ${state.results.size} 个文件：$okCount 成功，" +
+                                "${state.results.size - okCount} 失败/取消/跳过",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = BlExt.textSecondary,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    BlOutlinedButton(
+                        onClick = onShowResult,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("查看结果") }
                 }
             }
 

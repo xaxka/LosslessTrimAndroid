@@ -552,15 +552,15 @@ object Probe {
     /**
      * 系统内存压力回调（MainApplication.onTrimMemory 路由过来）。
      *
-     * MODERATE 及以上：清空 keyframeCache。代价是回到分析页可能重抽一次关键帧，
+     * 任何压力档都清空 keyframeCache。代价是回到分析页可能重抽一次关键帧，
      * 但 L2 Room 还在（持久库），只是 L1 重新填一遍——比持续占住 RAM 把后台
      * 进程顶出 LMK 便宜得多。
+     * （旧实现 >= MODERATE(60) 才动手，前台吃紧/退后台档全为 no-op，
+     * 与 MainApplication 承诺的"压力下释放可重建缓存"不符）
      */
     fun onTrimMemory(level: Int) {
-        when {
-            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_MODERATE -> {
-                keyframeCache.clear()
-            }
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE) {
+            keyframeCache.clear()
         }
     }
 
