@@ -583,13 +583,15 @@ object ThumbStore {
         // --- 软件解码命令 ---
         val swCommon = "-hide_banner -loglevel info -err_detect ignore_err -threads 0"
         val swVf = "scale='min($maxPx,iw)':-1:in_color_matrix=auto:out_color_matrix=bt709:out_range=pc"
-        val swInputCmd = "$swCommon -ss $ssStr -i \"$path\" -an -sn -frames:v 1 -vf \"$swVf\" -q:v 3 -y \"${outFile.absolutePath}\""
+        // 源路径经 CommandQuoting.quoteArg 转义（防引号/反斜杠文件名拆词与选项注入）；
+        // 输出为 cache 目录下自生成文件名，安全但同样走统一转义
+        val swInputCmd = "$swCommon -ss $ssStr -i ${CommandQuoting.quoteArg(path)} -an -sn -frames:v 1 -vf \"$swVf\" -q:v 3 -y ${CommandQuoting.quoteArg(outFile.absolutePath)}"
         // 有关键帧信息时用最近关键帧做 pre-seek（output-seek 距离最小，AVDiscard 加速），
         // 无关键帧信息时回退固定 30s pre-buffer
         val preSec = nearestKfSec?.coerceIn(0.0, ss) ?: (ss - 30.0).coerceAtLeast(0.0)
         val outDelta = ss - preSec
-        val swOutCmd = "$swCommon -ss ${String.format(Locale.US, "%.3f", preSec)} -i \"$path\" " +
-                "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$swVf\" -q:v 3 -y \"${outFile.absolutePath}\""
+        val swOutCmd = "$swCommon -ss ${String.format(Locale.US, "%.3f", preSec)} -i ${CommandQuoting.quoteArg(path)} " +
+                "-ss ${String.format(Locale.US, "%.3f", outDelta)} -an -sn -frames:v 1 -vf \"$swVf\" -q:v 3 -y ${CommandQuoting.quoteArg(outFile.absolutePath)}"
 
         val firstCmd = if (nearestKfSec != null) swOutCmd else swInputCmd
         return try {

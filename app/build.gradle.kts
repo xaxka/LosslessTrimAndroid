@@ -9,18 +9,22 @@ plugins {
 }
 
 // 版本号规则（Asia/Shanghai 时区，按构建时刻生成）：
-//   versionName = YY.MM.DD             例 26.08.19
-//   versionCode = YYMMDDHHt（9 位整数）例 260819143（t = 分钟的十分钟位 0-5）
+//   versionName = YY.MM.DD.HHmm   例 26.08.19.1432（本地构建带 HHmm 时间戳
+//                                 后缀，同日多次构建可区分）
+//   versionCode = YYMMDDHH×10+分钟 例 26081914×10+43 = 260819143（9 位整数）
 // CI 通过 -PversionName / -PversionCode 显式传入（保证一次流水线内产物一致）；
-// 本地构建未传参时按当前时间生成。versionCode 上限 991231235 < 2100000000，合法。
+// 本地构建未传参时按当前时间生成。本地 versionCode 粒度为**分钟**（M5：原
+// 十分钟位粒度同窗口重复构建会撞 versionCode，覆盖安装语义含糊）；同分钟内
+// 多次构建仍会重复，此时依赖 versionName 的 HHmm 后缀区分。
+// versionCode 上限 99123123×10+59 = 991231289 < 2100000000，合法。
 fun devVersionName(): String =
     ZonedDateTime.now(ZoneId.of("Asia/Shanghai"))
-        .format(DateTimeFormatter.ofPattern("yy.MM.dd"))
+        .format(DateTimeFormatter.ofPattern("yy.MM.dd.HHmm"))
 
 fun devVersionCode(): Int {
     val now = ZonedDateTime.now(ZoneId.of("Asia/Shanghai"))
     val base = now.format(DateTimeFormatter.ofPattern("yyMMddHH")).toInt()
-    return base * 10 + now.minute / 10
+    return base * 10 + now.minute
 }
 
 android {

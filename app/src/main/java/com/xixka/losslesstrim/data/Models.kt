@@ -173,7 +173,7 @@ data class VideoEntry(
     val name: String,      // 显示名（含扩展名）
     val sizeBytes: Long,
     val probe: ProbeResult,
-    val filePath: String? = null, // 可直接访问的绝对路径（已授权全部文件权限时非空，否则走 saf:）
+    val filePath: String? = null, // 可直接访问的绝对路径（已授权"所有文件"权限时非空；SAF 通道已移除，缺失即失败）
 ) {
     val isSingleFile: Boolean get() = folderUri == null
     val baseName: String get() = name.substringBeforeLast('.', name)

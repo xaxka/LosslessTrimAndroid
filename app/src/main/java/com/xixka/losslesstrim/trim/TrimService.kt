@@ -13,6 +13,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.provider.MediaStore
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.antonkarpenko.ffmpegkit.FFmpegKit
 import com.antonkarpenko.ffmpegkit.FFmpegKitConfig
@@ -25,6 +26,7 @@ import com.xixka.losslesstrim.data.VideoEntry
 import com.xixka.losslesstrim.ffmpeg.Probe
 import com.xixka.losslesstrim.ffmpeg.SessionBridge
 import com.xixka.losslesstrim.ffmpeg.SyncSamples
+import com.xixka.losslesstrim.util.CommandQuoting
 import com.xixka.losslesstrim.util.Formats
 import com.xixka.losslesstrim.util.StorageAccess
 import kotlinx.coroutines.CoroutineScope
@@ -52,6 +54,7 @@ class TrimService : Service() {
         const val ACTION_CANCEL = "com.xixka.losslesstrim.ACTION_CANCEL"
         const val CHANNEL_ID = "trim_queue"
         const val NOTIF_ID = 1001
+        private const val TAG = "TrimService"
 
         /**
          * MKV+B帧 seek 前移补偿量（秒）：3/23≈130.4ms 向上取整到 ms，抵消
@@ -428,7 +431,10 @@ class TrimService : Service() {
             val sb = StringBuilder()
             sb.append("-hide_banner -y")
             sb.append(seekArgs(ss))
-            sb.append(" -i \"").append(inParam).append("\"")
+            // 路径一律经 CommandQuoting.quoteArg 转义：ffmpeg-kit parseArguments
+            // 是自实现引号切换解析器，路径含 "/'/\ 时裸拼接会被拆词甚至注入
+            // 任意选项（详见 util/CommandQuoting.kt）
+            sb.append(" -i ").append(CommandQuoting.quoteArg(inParam))
             sb.append(" -t ").append(Formats.secs3(dur))
             for (i in kept) sb.append(" -map 0:").append(i)
             sb.append(subtitleFallbackArgs(probe))
@@ -443,7 +449,7 @@ class TrimService : Service() {
             if (target.muxer == "mp4") sb.append(" -movflags +faststart+use_metadata_tags")
             sb.append(" -ignore_unknown")
             sb.append(" -f ").append(target.muxer)
-            sb.append(" \"").append(outParam).append("\"")
+            sb.append(" ").append(CommandQuoting.quoteArg(outParam))
             return sb.toString()
         }
     }
@@ -545,7 +551,10 @@ class TrimService : Service() {
             val nm = getSystemService(NotificationManager::class.java) ?: return
             nm.notify(NOTIF_ID, buildNotification(done, total, name, progress, speed))
         } catch (_: SecurityException) {
-        } catch (_: Exception) {
+            // POST_NOTIFICATIONS 未授予：正常降级，不打扰
+        } catch (e: Exception) {
+            // 留痕：通知管线异常若完全静默，进度条"卡住"类反馈无从区分原因
+            Log.w(TAG, "notifyProgress failed at $done/$total", e)
         }
     }
 
@@ -575,7 +584,20 @@ class TrimService : Service() {
                     } catch (ce: CancellationException) {
                         throw ce
                     } catch (e: Exception) {
-                        // 单文件未捕获异常不能拖死整个队列：记失败、继续其余文件
+                        // 单文件未捕获异常不能拖死整个队列：记失败、继续其余文件。
+                        // 另存模式此时可能残留 .part 或（理论上 rename 后构造结果前
+                        // 异常的）目标半成品——尽力清理，绝不在用户另存位置留坏文件
+                        if (job.outputUri != null) {
+                            try {
+                                StorageAccess.writableTarget(this, job.outputUri)?.let { f ->
+                                    File(f.parentFile, f.name + ".part").delete()
+                                    f.delete()
+                                }
+                            } catch (_: Exception) {
+                            }
+                        }
+                        // 留痕：结果页只有一句"内部错误"，堆栈是排查唯一线索
+                        Log.w(TAG, "processJob internal error: ${job.entry.name}", e)
                         FileResult(
                             entry = job.entry,
                             plan = TrimPlanner.logicalPlan(job.entry, job.settings, job.override),
@@ -606,9 +628,11 @@ class TrimService : Service() {
                 }
             } catch (ce: CancellationException) {
                 throw ce
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 // 兜底：队列级逻辑异常也确保发出 Finished——否则 queueUi 永远停在
-                // Running，处理页永久转圈、首页"开始处理"被 running 标志挡死
+                // Running，处理页永久转圈、首页"开始处理"被 running 标志挡死。
+                // 留痕：此类异常静默时线上无从排查
+                Log.w(TAG, "runQueue queue-level fallback triggered", e)
             }
             TrimController.lastResults.value = results
             TrimController.queueUi.value = QueueUi.Finished(results)
@@ -700,38 +724,58 @@ class TrimService : Service() {
                 reason = "无法定位源文件路径（未授予\u201c所有文件\u201d权限？SAF 通道已移除，授权后请重扫）"
             )
 
-        // ---- 单文件模式：直接写另存目标（无目录写权限，不走 .part/rename） ----
+        // ---- 单文件模式：另存目标 ----
         // 直路径写出：绕开 saf: 只写描述符——faststart 收尾要回 seek 移数据重写
         // moov，只写 SAF fd 上不可靠，正是"输出校验失败 moov atom not found"的
         // 根因。SAF 写通道已移除，目标不可定位直接失败并提示。
+        // 与目录模式同款 .part 纪律：先写同目录临时文件，终检通过后原子改名
+        // 到最终目标。进程被 LMK 杀死/中途崩溃（runQueue 层兜底 catch 只记结果
+        // 不清理）时，另存位置最多残留明确标记的 .part 半成品（下次同目标处理
+        // 或兜底清理会删），不会留一个看似完整实则损坏的目标文件。
         if (job.outputUri != null) {
             val outFile = StorageAccess.writableTarget(this, job.outputUri)
                 ?: return FileResult(
                     entry, plan, Outcome.FAILED, entry.sizeBytes,
                     reason = "另存目标无法定位为本地路径（未授权或非本地存储），SAF 通道已移除"
                 )
-            val run = runTrimVerified(inParam, outFile.absolutePath, plan, kept, target, entry, idx, total, defAudio, defSub)
+            val partFile = outFile.parentFile?.let { File(it, outFile.name + ".part") }
+                ?: return FileResult(
+                    entry, plan, Outcome.FAILED, entry.sizeBytes,
+                    reason = "另存目标目录异常，无法写入临时文件"
+                )
+            if (partFile.exists()) partFile.delete()
+
+            val run = runTrimVerified(inParam, partFile.absolutePath, plan, kept, target, entry, idx, total, defAudio, defSub)
             val rc = run.session?.returnCode
             if (rc == null) {
-                outFile.delete()
+                partFile.delete()
                 return FileResult(entry, plan, Outcome.FAILED, entry.sizeBytes, reason = "ffmpeg 会话异常结束")
             }
             if (rc.isValueCancel || TrimController.cancelRequested) {
-                outFile.delete()
+                partFile.delete()
                 return FileResult(entry, plan, Outcome.CANCELLED, entry.sizeBytes, reason = "已取消（原文件未动）")
             }
             if (!rc.isValueSuccess) {
-                outFile.delete()
+                partFile.delete()
                 return FileResult(entry, plan, Outcome.FAILED, entry.sizeBytes, reason = extractError(run.session!!))
             }
-            val newSize = outFile.length().coerceAtLeast(0)
+            val newSize = partFile.length().coerceAtLeast(0)
             // 时间轴校验问题（起点/时长/流存在性）在 runTrimVerified 内已含降级重跑
             val issues = run.issues.orEmpty()
             if (newSize <= 0 || issues.isNotEmpty()) {
-                outFile.delete()
+                partFile.delete()
                 return FileResult(
                     entry, plan, Outcome.FAILED, entry.sizeBytes,
                     reason = "输出校验失败（${issues.firstOrNull() ?: "空文件"}），请重试"
+                )
+            }
+            // 终检通过：同目录 rename(2) 原子替换目标（CreateDocument 给出的
+            // 占位文档/用户选择覆盖的旧文件）。失败即清理，绝不让半成品落位
+            if (!partFile.renameTo(outFile)) {
+                partFile.delete()
+                return FileResult(
+                    entry, plan, Outcome.FAILED, entry.sizeBytes,
+                    reason = "另存目标替换失败（IO 错误），请重试"
                 )
             }
             publishRunning(idx + 1, total, entry.name, 1f, "")

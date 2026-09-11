@@ -21,7 +21,8 @@ import java.io.File
  * 成功但产物缺 moov（"moov atom not found"），终检判坏删除后表现为"转码成功的
  * 文件消失了"。改为直接文件路径后 ffmpeg 走普通文件 I/O，faststart 完全可靠。
  *
- * 权限未授予时所有换算一律返回 null，调用方自动退回原 saf: 流程（功能不失效）。
+ * SAF(saf:) 数据通道已整体移除：换算失败（未授权等）一律返回 null，调用方
+ * 直接失败并提示授权，不存在 SAF 回退流程。
  */
 object StorageAccess {
 

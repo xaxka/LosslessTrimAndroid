@@ -12,6 +12,7 @@ import com.antonkarpenko.ffmpegkit.FFprobeSession
 import com.xixka.losslesstrim.data.ProbeResult
 import com.xixka.losslesstrim.data.ProbeStore
 import com.xixka.losslesstrim.data.StreamInfo
+import com.xixka.losslesstrim.util.CommandQuoting
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -312,7 +313,7 @@ object Probe {
         var result: ProbeResult? = null
         for (attempt in 1..PROBE_ATTEMPTS) {
             val outcome = runProbe(
-                "-v error -show_streams -show_format -of json -i \"$path\""
+                "-v error -show_streams -show_format -of json -i ${CommandQuoting.quoteArg(path)}"
             )
             result = when {
                 outcome.timedOut -> ProbeResult(
@@ -520,7 +521,7 @@ object Probe {
             val spillDir = File(context.cacheDir, "probe-spill")
             val kfs = ArrayList<Double>()
             val ok = runProbeToDisk(
-                "-v error -select_streams v:0 -show_entries packet=pts_time,flags -of csv=p=0 -i \"$path\"",
+                "-v error -select_streams v:0 -show_entries packet=pts_time,flags -of csv=p=0 -i ${CommandQuoting.quoteArg(path)}",
                 spillDir,
             ) { reader ->
                 reader.forEachLine { line -> parseKeyframeLine(line, kfs) }
@@ -634,7 +635,7 @@ object Probe {
             val kfs = ArrayList<Double>()
             val ok = runProbeToDisk(
                 "-v error -select_streams v:0 -show_entries packet=pts_time,flags " +
-                        "-of csv=p=0 -read_intervals \"$intervals\" -i \"$path\"",
+                        "-of csv=p=0 -read_intervals \"$intervals\" -i ${CommandQuoting.quoteArg(path)}",
                 spillDir,
             ) { reader ->
                 reader.forEachLine { line -> parseKeyframeLine(line, kfs) }
@@ -684,7 +685,7 @@ object Probe {
             } else "%+#8"
             val outcome = runProbe(
                 "-v error -read_intervals \"$interval\" -select_streams $streamSpec " +
-                        "-show_entries packet=pts_time -of csv=p=0 -i \"$path\""
+                        "-show_entries packet=pts_time -of csv=p=0 -i ${CommandQuoting.quoteArg(path)}"
             )
             if (!outcome.ok || outcome.output.isBlank()) null
             else outcome.output.lineSequence()

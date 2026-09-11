@@ -5,9 +5,11 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-    <!-- 直接文件路径读写（优先管线）：SAF(saf: 协议)只写描述符上 -movflags +faststart
-         收尾回移数据不可靠，部分设备产出缺 moov 的坏 MP4。授予"所有文件"权限后
-         ffmpeg 走普通文件 I/O，彻底规避。未授予时自动退回 SAF 流程（功能不失效）。 -->
+    <!-- 直路径唯一管线：SAF(saf: 协议)只写描述符上 -movflags +faststart
+         收尾回移数据不可靠，部分设备产出缺 moov 的坏 MP4，SAF 数据通道已彻底
+         移除。须授予"所有文件"权限后 ffmpeg 走普通文件 I/O；未授予时直接
+         报错引导授权（无回退通道）。无 INTERNET 权限：应用为纯本地工具，
+         无任何网络访问（更新需自行关注 GitHub Releases）。 -->
     <uses-permission
         android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />

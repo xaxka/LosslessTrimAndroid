@@ -132,7 +132,8 @@ fun HomeScreen(
     ) { granted ->
         val act = afterPermAction
         afterPermAction = null
-        if (!granted) hint = "未授予存储权限，将退回 SAF 模式（部分设备可能转码失败）"
+        // SAF 回退已移除：无权限时直路径读写直接失败，如实提示（M4）
+        if (!granted) hint = "未授予存储权限，无法读写文件，请到系统设置授权"
         act?.invoke()
     }
 

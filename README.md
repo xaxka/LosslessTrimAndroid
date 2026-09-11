@@ -12,17 +12,16 @@
 - 单文件分析视图：时间轴 + 关键帧标记 + 切点抽帧预览 + 轨道逐轨勾选
 - 输出容器：保持原容器 / MP4 / MKV（只换封装不转码）
 - 批量串行处理（前台服务 + 通知栏进度 + 取消）
-- 默认直接覆盖原文件（`.part` 临时文件成功后才替换），可选保留原文件输出到 `CutVideos/`
+- 默认直接覆盖原文件（`.part` 临时文件成功后才替换，单文件另存模式同款 `.part` → 校验 → 原子改名纪律），可选保留原文件输出到 `CutVideos/`
 - 结果页：成功/失败/跳过统计、失败原因、一键重试、体积对比
-- 应用内检查更新：对比 GitHub Releases 版本号，下载 APK 并拉起系统安装器
+- ffmpeg 命令的路径统一转义（`CommandQuoting`）：文件名含 `"` `'` `\` 等特殊字符不会被拆词，也无法注入 ffmpeg 选项
 
 ## 技术栈
 
 - Kotlin + Jetpack Compose（Material 3）
 - UI 遵循 **Blue Light UI** 设计系统：固定浅色（冷白底 × 白卡 1dp 描边 × 浅蓝主强调 × 语义状态色），无阴影卡片、统一空状态、统计卡结果页
 - [ffmpeg-kit 社区维护版 fork](https://github.com/sk3llo/ffmpeg-kit-flutter)（`com.antonkarpenko:ffmpeg-kit-min`，官方 ffmpeg-kit 已归档）：min 包（约省 60MB native lib）内置 libavcodec 原生 h264/hevc 软解，剪辑走 `-c copy` 不需要编解码器；缩略图抽帧 = FFmpeg 软解（默认）或系统 MediaCodec 直解（实验，10-bit 走 P010→8bit 自管颜色），`-hwaccel mediacodec` copyback 路线已移除（单帧抽帧 GOP 全解 + 每帧显存拷回，实测比软解更慢且 10-bit 颜色不可靠）；早年"min 包 HEVC 花屏"实为 limited-range 直出 JPEG 的颜色范围 bug，已由抽帧链的 `out_range=pc` 修复
-- 存储访问双管线：优先"所有文件"权限 + 直接文件路径读写；未授权自动退回 SAF（`saf:` 协议）
-  - 直路径是推荐方式：`saf:` 只写描述符上 `-movflags +faststart` 收尾回移数据不可靠，部分设备产出缺 moov 的坏 MP4（表现为"输出校验失败 moov atom not found"），终检会拦截并回滚原文件
+- 存储访问单管线（直路径）：须授予"所有文件"权限，ffmpeg 直接读写真实文件路径；未授权直接报错引导去系统设置授权，无 SAF 回退（`saf:` 数据通道已彻底移除——只写描述符上 `-movflags +faststart` 收尾回移数据不可靠，部分设备产出缺 moov 的坏 MP4，且 fork 的 SAF 参数构造存在越界崩溃）
 - DataStore 参数记忆、前台 Service（dataSync）串行队列
 
 ## 构建
