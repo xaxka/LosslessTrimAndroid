@@ -49,4 +49,5 @@ CI 实际执行的命令（仅作参考，**本地禁止执行**）：
 - `ThumbStore` 抽帧链（软解优先、`out_range=pc` 颜色修复）同样在守卫覆盖内，勿轻易改动。
 - SAF（`saf:`）数据通道已彻底移除（有 faststart 坏 MP4 与崩溃问题），不要重新引入；存储访问走"所有文件"权限 + 直路径单管线。
 - `docs/` 曾随提交 1da92e2 被误删后恢复，删除/改名 docs 前先确认代码、单测、脚本无引用。
+- release 开启 R8 + 资源收缩；`app/proguard-rules.pro` 里 ffmpeg-kit 整包 `-keep` 是 JNI 静态注册边界（改名/收缩即运行时 `UnsatisfiedLinkError` 崩溃），勿删改。
 - `keystore.jks` 与签名密码在仓库内明文存放（README 已说明，个人自用），不要外传或改动签名配置。
